@@ -74,23 +74,29 @@ class R1LiteObsWrapper(gym.ObservationWrapper):
 class R1LiteTeleopInterventionWrapper(gym.ActionWrapper):
     """
     Map SpaceMouse teleop onto the dual-arm high-level action interface.
-    One device controls one arm, two devices control both arms.
+    One device controls a selected arm, two devices control both arms.
     """
 
-    def __init__(self, env, action_indices=None):
+    def __init__(self, env, action_indices=None, arm="right"):
         super().__init__(env)
+        assert arm in ("left", "right", "dual")
         self.expert = SpaceMouseExpert()
         self.action_indices = action_indices
+        self.arm = arm
         self.left1 = self.left2 = self.right1 = self.right2 = False
 
     def action(self, action: np.ndarray) -> np.ndarray:
         expert_a, buttons = self.expert.get_action()
-        intervened = False
-        self.left1, self.left2, self.right1, self.right2 = tuple(buttons) if len(buttons) == 4 else (False, False, False, False)
         mapped = np.zeros_like(action)
-        if len(expert_a) >= 12 and mapped.shape[0] >= 14:
+        self.left1 = self.left2 = self.right1 = self.right2 = False
+
+        if self.arm == "dual":
+            if len(expert_a) < 12 or mapped.shape[0] < 14:
+                return action, False
             mapped[:6] = expert_a[:6]
             mapped[7:13] = expert_a[6:12]
+            if len(buttons) == 4:
+                self.left1, self.left2, self.right1, self.right2 = tuple(buttons)
             if self.left1:
                 mapped[6] = -1.0
             elif self.left2:
@@ -99,14 +105,47 @@ class R1LiteTeleopInterventionWrapper(gym.ActionWrapper):
                 mapped[13] = -1.0
             elif self.right2:
                 mapped[13] = 1.0
-            intervened = np.linalg.norm(mapped) > 1e-3
-        elif len(expert_a) >= 6 and mapped.shape[0] >= 7:
-            mapped[:6] = expert_a[:6]
-            if self.left1:
-                mapped[6] = -1.0
-            elif self.left2:
-                mapped[6] = 1.0
-            intervened = np.linalg.norm(mapped) > 1e-3
+        else:
+            if len(expert_a) < 6:
+                return action, False
+            if mapped.shape[0] >= 14:
+                if self.arm == "left":
+                    mapped[:6] = expert_a[:6]
+                else:
+                    mapped[7:13] = expert_a[:6]
+            elif mapped.shape[0] >= 7:
+                mapped[:6] = expert_a[:6]
+            else:
+                return action, False
+
+            close_pressed = len(buttons) >= 1 and buttons[0]
+            open_pressed = len(buttons) >= 2 and buttons[-1]
+            if self.arm == "left":
+                self.left1, self.left2 = close_pressed, open_pressed
+                if mapped.shape[0] >= 14:
+                    if self.left1:
+                        mapped[6] = -1.0
+                    elif self.left2:
+                        mapped[6] = 1.0
+                elif mapped.shape[0] >= 7:
+                    if self.left1:
+                        mapped[6] = -1.0
+                    elif self.left2:
+                        mapped[6] = 1.0
+            else:
+                self.right1, self.right2 = close_pressed, open_pressed
+                if mapped.shape[0] >= 14:
+                    if self.right1:
+                        mapped[13] = -1.0
+                    elif self.right2:
+                        mapped[13] = 1.0
+                elif mapped.shape[0] >= 7:
+                    if self.right1:
+                        mapped[6] = -1.0
+                    elif self.right2:
+                        mapped[6] = 1.0
+
+        intervened = np.linalg.norm(mapped) > 1e-3
 
         if self.action_indices is not None:
             filtered = np.zeros_like(mapped)
