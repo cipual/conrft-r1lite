@@ -57,16 +57,25 @@ def add_mc_returns_to_trajectory(trajectory, gamma, reward_scale, reward_bias, r
     return trajectory
 
 
-def add_embeddings_to_trajectory(trajectory, model, tasks):
+def add_embeddings_to_trajectory(
+    trajectory,
+    model,
+    tasks,
+    image_keys=("side_policy_256", "wrist_1"),
+):
     """
     undate every transition in the trajectory and add embeddings
     return the updated trajectory
     """
+    if len(image_keys) < 2:
+        raise ValueError("add_embeddings_to_trajectory requires two image keys")
+
+    primary_key, wrist_key = image_keys[:2]
     for i in range(len(trajectory)):
         observation = trajectory[i]['observations']
 
-        image_primary = observation["side_policy_256"]
-        image_wrist = observation["wrist_1"]
+        image_primary = observation[primary_key]
+        image_wrist = observation[wrist_key]
         # Add batch dimension
         image_primary = image_primary[np.newaxis, ...]
         image_wrist = image_wrist[np.newaxis, ...]

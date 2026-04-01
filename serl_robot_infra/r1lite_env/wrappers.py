@@ -71,6 +71,50 @@ class R1LiteObsWrapper(gym.ObservationWrapper):
         return self.observation(obs), info
 
 
+class R1LiteSingleArmConRFTObsWrapper(gym.ObservationWrapper):
+    """
+    Adapt single-arm R1 Lite observations to the state/images structure expected
+    by SERLObsWrapper and ConRFT.
+    """
+
+    def __init__(self, env, image_aliases=None):
+        super().__init__(env)
+        default_aliases = {
+            "head": "image_primary",
+            "left_wrist": "image_wrist",
+            "right_wrist": "image_wrist",
+        }
+        self.image_aliases = image_aliases or default_aliases
+
+        state_space = self.env.observation_space["state"]
+        image_space = self.env.observation_space["images"]
+        remapped_images = {}
+        for source_key, target_key in self.image_aliases.items():
+            if source_key in image_space.spaces and target_key not in remapped_images:
+                remapped_images[target_key] = image_space[source_key]
+
+        self.observation_space = gym.spaces.Dict(
+            {
+                "state": state_space,
+                "images": gym.spaces.Dict(remapped_images),
+            }
+        )
+
+    def observation(self, observation):
+        images = {}
+        for source_key, target_key in self.image_aliases.items():
+            if source_key in observation["images"] and target_key not in images:
+                images[target_key] = observation["images"][source_key]
+        return {
+            "state": observation["state"],
+            "images": images,
+        }
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        return self.observation(obs), info
+
+
 class R1LiteTeleopInterventionWrapper(gym.ActionWrapper):
     """
     Map SpaceMouse teleop onto the dual-arm high-level action interface.

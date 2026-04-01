@@ -70,7 +70,11 @@ def main(_):
                 trajectory = add_mc_returns_to_trajectory(
                     trajectory, config.discount, FLAGS.reward_scale, FLAGS.reward_bias, config.reward_neg, is_sparse_reward=True)
                 trajectory = add_embeddings_to_trajectory(
-                    trajectory, model, tasks=tasks)
+                    trajectory,
+                    model,
+                    tasks=tasks,
+                    image_keys=tuple(config.image_keys),
+                )
                 trajectory = add_next_embeddings_to_trajectory(trajectory)
                 for transition in trajectory:
                     transitions.append(copy.deepcopy(transition))

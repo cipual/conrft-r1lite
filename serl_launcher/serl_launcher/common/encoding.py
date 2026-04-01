@@ -94,6 +94,14 @@ class OctoEncodingWrapper(nn.Module):
     enable_stacking: bool = False
     image_keys: Iterable[str] = ("image",)
 
+    def _resolve_octo_image_keys(self) -> Tuple[str, str]:
+        image_keys = tuple(self.image_keys)
+        if len(image_keys) < 2:
+            raise ValueError(
+                "OctoEncodingWrapper requires at least two image keys: primary and wrist"
+            )
+        return image_keys[0], image_keys[1]
+
     @nn.compact
     def __call__(
         self,
@@ -103,9 +111,10 @@ class OctoEncodingWrapper(nn.Module):
         train=True,
         stop_gradient=False,
     ) -> jnp.ndarray:   
-        if action_embeddings is None:     
-            image_primary = observations["side_policy_256"]
-            image_wrist = observations["wrist_1"]
+        if action_embeddings is None:
+            primary_key, wrist_key = self._resolve_octo_image_keys()
+            image_primary = observations[primary_key]
+            image_wrist = observations[wrist_key]
             if image_primary.ndim == 4:
                 image_primary = image_primary[jnp.newaxis, ...]
                 image_wrist = image_wrist[jnp.newaxis, ...]
@@ -159,5 +168,4 @@ class OctoEncodingWrapper(nn.Module):
             encoded = jnp.concatenate([encoded, state], axis=-1)
 
         return encoded, action_embeddings
-
 
