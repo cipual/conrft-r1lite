@@ -57,6 +57,20 @@ class R1LiteClient:
         response.raise_for_status()
         return response.json()
 
+    def clear_fault(self, owner: str = "debug") -> Dict[str, Any]:
+        response = self.session.post(self._url("clear_fault"), json={"owner": owner}, timeout=self.timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def brake(self, enabled: bool, owner: str = "debug") -> Dict[str, Any]:
+        response = self.session.post(
+            self._url("brake"),
+            json={"enabled": bool(enabled), "owner": owner},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def reset(self, left_pose=None, right_pose=None, torso=None, owner: str = "debug") -> Dict[str, Any]:
         payload = {"owner": owner}
         if left_pose is not None:

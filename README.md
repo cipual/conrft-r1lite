@@ -1,105 +1,191 @@
-# ConRFT: A Reinforced Fine-tuning Method for VLA Models via Consistency Policy
+# ConRFT R1Lite Inference Guide
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Static Badge](https://img.shields.io/badge/Project-Page-a)](https://cccedric.github.io/conrft/)
+This `README.md` is the running inference-side integration guide for `conrft-r1lite`. New teleop, monitor, and debugging features should be documented here as they are added.
 
-We provide examples to fine-tune Octo, on the top of [HIL-SERL](https://github.com/rail-berkeley/hil-serl) that provides the base environment to perform robotic manipulation tasks with human interventions. The following sections describe how to use our code. 
+The original research-oriented repository README has been preserved at [docs/research_readme_original.md](./docs/research_readme_original.md).
 
+## Service Address
 
-**Table of Contents**
-- [ConRFT: A Reinforced Fine-tuning Method for VLA Models via Consistency Policy](#conrft-a-reinforced-fine-tuning-method-for-vla-models-via-consistency-policy)
-  - [🛠️ Installation Instructions](#️-installation-instructions)
-  - [💻 Overview and Code Structure](#-overview-and-code-structure)
-  - [✉️ Contact](#️-contact)
-  - [🙏 Acknowledgement](#-acknowledgement)
-  - [📝 Citation](#-citation)
+Set the robot service address first:
 
-## 🛠️ Installation Instructions
-1. **Setup Conda Environment:**
-    create an environment with
-    ```bash
-    conda create -n conrft python=3.10
-    ```
-
-2. **Install Jax as follows:**
-    - For CPU (not recommended):
-        ```bash
-        pip install --upgrade "jax[cpu]"
-        ```
-
-    - For GPU:
-        ```bash
-        pip install --upgrade "jax[cuda11_pip]==0.4.20" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-        ```
-    - See the [Jax Github page](https://github.com/google/jax) for more details on installing Jax.
-
-3. **Install the Octo**
-    ```bash
-    git clone git@github.com:cccedric/octo.git
-    cd octo
-    pip install -e .
-    pip install -r requirements.txt
-    ```
-    **Note**: This is a personalized fork of Octo, adding custom functions while preserving its core capabilities for general-purpose robotic manipulation.
-
-4. **Install the serl_launcher**
-    ```bash
-    cd serl_launcher
-    pip install -e .
-    pip install -r requirements.txt
-    ```
-
-5. **Install for serl_robot_infra** 
-   
-   Please refer to the [README](./serl_robot_infra/README.md) in the `serl_robot_infra` directory for installation instructions and details on operating the Franka robot arm. This document includes guidance on setting up the impedance-based [serl_franka_controllers](https://github.com/rail-berkeley/serl_franka_controllers). After completing the installation, you should be able to start the robot server and interact with the `franka_env` gym for hardware control.
-
-
-## 💻 Overview and Code Structure
-
-We offers a set of code for fine-tuning Octo in robotic manipulation tasks. The approach's pipeline consists of an actor thread and a learner thread, both of which interact with the robot gym environment. These two threads operate asynchronously, with data transmitted from the actor to the learner node over the network using [agentlace](https://github.com/youliangtan/agentlace). The learner thread periodically updates the policy and syncs it with the actor. 
-
-**Table for code structure**
-
-| Code Directory | Description |
-| --- | --- |
-| examples | Scripts for policy training, demonstration data collection, reward classifier training |
-| serl_launcher | Main code for Agent Training |
-| serl_launcher.agents | Agent Policies (e.g. SAC, BC) |
-| serl_launcher.wrappers | Gym env wrappers |
-| serl_launcher.data | Replay buffer and data store |
-| serl_launcher.vision | Vision related models and utils |
-| serl_robot_infra | Robot infra for running with real robots |
-| serl_robot_infra.robot_servers | Flask server for sending commands to robot via ROS |
-| serl_robot_infra.franka_env | Gym env for Franka robot |
-
-We provide a step-by-step guide in [franka_walkthrough](/docs/franka_walkthrough.md) to fine-tune VLA with ConRFT on a Franka robot.
-
-## ✉️ Contact
-For any questions, please feel free to email [chenyuhui2022@ia.ac.cn](mailto:chenyuhui2022@ia.ac.cn).
-
-## 🙏 Acknowledgement
-Our code is built upon [CPQL](https://github.com/cccedric/cpql/), [Octo](https://github.com/octo-models/octo), [HIL-SERL](https://github.com/rail-berkeley/hil-serl). We thank all these authors for their nicely open sourced code and their great contributions to the community.
-
-## 📝 Citation
-
-If you find our research helpful and would like to reference it in your work, please consider using one of the following citations, depending on the format that best suits your needs:
-
-For the Arxiv version:
-```bibtex
-@article{chen2025conrft,
-  title={ConRFT: A Reinforced Fine-tuning Method for VLA Models via Consistency Policy},
-  author={Chen, Yuhui and Tian, Shuai and Liu, Shugao and Zhou, Yingting and Li, Haoran and Zhao, Dongbin},
-  journal={arXiv preprint arXiv:2502.05450},
-  year={2025}
-}
-```
-Or, for citing our work presented at the conference of RSS 2025:
-```bibtex
-@inproceedings{chen2025conrft, 
-    title={ConRFT: A Reinforced Fine-tuning Method for VLA Models via Consistency Policy}, 
-    author={Yuhui Chen and Shuai Tian and Shugao Liu and Yingting Zhou and Haoran Li and Dongbin Zhao}, 
-    booktitle={Proceedings of Robotics: Science and Systems, {RSS} 2025, Los Angeles, CA, USA, Jun 21-25, 2025}, 
-    doi={10.15607/RSS.2025.XXI.019
-} 
+```bash
+export ROBOT=http://127.0.0.1:8001
 ```
 
+If the robot service runs on another machine:
+
+```bash
+export ROBOT=http://192.168.12.12:8001
+```
+
+## Permission Table
+
+| Owner | Allowed endpoints | Purpose |
+| --- | --- | --- |
+| public | `GET /state`, `GET /health` | read-only inspection |
+| policy | `POST /action` | inference env control, including policy rollout |
+| teleop | `POST /action` | human teleoperation only; requires `teleop_source="spacemouse"` |
+| debug | `POST /reset`, `POST /recover`, `POST /clear_fault`, `POST /brake` | maintenance and recovery only |
+
+Rules:
+
+- `POST /action` rejects `owner="debug"` with HTTP 403.
+- `POST /action` requires `teleop_source="spacemouse"` when `owner="teleop"`.
+- `POST /reset`, `POST /recover`, `POST /clear_fault`, and `POST /brake` reject `owner!="debug"` with HTTP 403.
+- `policy` and `teleop` share the control-owner timeout lock. If one is active, the other receives HTTP 409 until the lock expires.
+
+## Quick HTTP Checks
+
+Use `--noproxy '*'` on the inference machine so `curl` matches the Python client behavior and talks to the robot service directly.
+
+Read current state without image payload:
+
+```bash
+curl --noproxy '*' -s "$ROBOT/state" | jq '{state, meta}'
+```
+
+Read image payload only:
+
+```bash
+curl --noproxy '*' -s "$ROBOT/state" | jq '.images'
+```
+
+Read health:
+
+```bash
+curl --noproxy '*' -X GET "$ROBOT/health"
+```
+
+Send a policy action:
+
+```bash
+curl --noproxy '*' -X POST "$ROBOT/action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "owner":"policy",
+    "seq":1,
+    "left":{
+      "pose_delta":[0.0,0.0,0.005,0.0,0.0,0.0],
+      "gripper":20.0,
+      "preset":"free_space"
+    }
+  }'
+```
+
+Send a teleop action:
+
+```bash
+curl --noproxy '*' -X POST "$ROBOT/action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "owner":"teleop",
+    "teleop_source":"spacemouse",
+    "seq":2,
+    "right":{
+      "pose_target":[0.35,0.25,0.32,0.0,1.0,0.0,0.0],
+      "gripper":30.0,
+      "preset":"free_space"
+    }
+  }'
+```
+
+Reset:
+
+```bash
+curl --noproxy '*' -X POST "$ROBOT/reset" \
+  -H "Content-Type: application/json" \
+  -d '{"owner":"debug"}'
+```
+
+Recover:
+
+```bash
+curl --noproxy '*' -X POST "$ROBOT/recover" \
+  -H "Content-Type: application/json" \
+  -d '{"owner":"debug"}'
+```
+
+Clear faults:
+
+```bash
+curl --noproxy '*' -X POST "$ROBOT/clear_fault" \
+  -H "Content-Type: application/json" \
+  -d '{"owner":"debug"}'
+```
+
+Enable brake:
+
+```bash
+curl --noproxy '*' -X POST "$ROBOT/brake" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true, "owner":"debug"}'
+```
+
+Disable brake:
+
+```bash
+curl --noproxy '*' -X POST "$ROBOT/brake" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false, "owner":"debug"}'
+```
+
+## Notes
+
+- If the service was started in MIT mode, keep `mode` in `/action` aligned with the startup mode.
+- HTTP 409 usually means the active control owner is still locked by another control session, or the requested mode does not match the startup mode.
+
+## SpaceMouse Teleop
+
+Run this from the inference machine workspace after the Python environment is ready:
+
+```bash
+cd ~/VLA-RL/conrft-r1lite/serl_robot_infra
+python -m r1lite_env.spacemouse_teleop --server-url "$ROBOT" --arm right
+```
+
+Useful options:
+
+- `--arm left|right|dual`
+- `--hz 10`
+- `--xyz-scale 0.03`
+- `--rot-scale 0.20`
+- `--preset free_space`
+- `--calibrate-seconds 0.5`
+- `--trans-deadzone 0.08`
+- `--rot-deadzone 0.08`
+
+Startup behavior:
+
+- `spacemouse_teleop` performs a short zero-bias calibration on startup. Keep the SpaceMouse untouched during this window.
+- Calibration logs are printed in the terminal, including estimated bias and deadzone configuration.
+
+## GUI Monitor
+
+Run this from the inference machine workspace:
+
+```bash
+cd ~/VLA-RL/conrft-r1lite/serl_robot_infra
+python -m r1lite_env.monitor_gui --server-url "$ROBOT" --image-hz 5 --state-period 0.5
+```
+
+What the GUI shows:
+
+- left panel: left arm command target, left arm state, `left_wrist` image
+- center panel: shared `head` image and maintenance buttons
+- right panel: right arm command target, right arm state, `right_wrist` image
+- bottom logs: `info`, `warning`, `fault`
+
+GUI controls:
+
+- `Brake Toggle`
+- `Reset`
+- `Clear Fault`
+- `Refresh Now`
+
+GUI refresh behavior:
+
+- images refresh continuously according to `--image-hz`
+- text state and command panels refresh every `--state-period` seconds
+- `info` logs include owner changes, teleop source changes, brake changes, and SpaceMouse teleop activation
+- `warning` logs include freshness / validity warnings
+- `fault` logs include body-service faults and request failures

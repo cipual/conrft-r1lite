@@ -9,6 +9,40 @@ from franka_env.spacemouse.spacemouse_expert import SpaceMouseExpert
 from r1lite_env.client import R1LiteClient
 
 
+def _estimate_idle_bias(expert: SpaceMouseExpert, duration_sec: float) -> np.ndarray:
+    if duration_sec <= 0.0:
+        action, _ = expert.get_action()
+        return np.zeros_like(np.asarray(action, dtype=np.float64))
+
+    deadline = time.time() + duration_sec
+    samples = []
+    while time.time() < deadline:
+        action, _ = expert.get_action()
+        samples.append(np.asarray(action, dtype=np.float64))
+        time.sleep(0.01)
+    if not samples:
+        action, _ = expert.get_action()
+        return np.zeros_like(np.asarray(action, dtype=np.float64))
+    return np.mean(np.stack(samples, axis=0), axis=0)
+
+
+def _apply_deadzone(action: np.ndarray, trans_deadzone: float, rot_deadzone: float) -> np.ndarray:
+    filtered = np.asarray(action, dtype=np.float64).copy()
+    if filtered.shape[0] >= 3:
+        filtered[:3][np.abs(filtered[:3]) < trans_deadzone] = 0.0
+    if filtered.shape[0] >= 6:
+        filtered[3:6][np.abs(filtered[3:6]) < rot_deadzone] = 0.0
+    if filtered.shape[0] >= 9:
+        filtered[6:9][np.abs(filtered[6:9]) < trans_deadzone] = 0.0
+    if filtered.shape[0] >= 12:
+        filtered[9:12][np.abs(filtered[9:12]) < rot_deadzone] = 0.0
+    return filtered
+
+
+def _has_button_press(buttons) -> bool:
+    return any(bool(value) for value in buttons)
+
+
 def _pose_target_from_action(tcp_pose: np.ndarray, action: np.ndarray, xyz_scale: float, rot_scale: float) -> np.ndarray:
     pose = np.asarray(tcp_pose, dtype=np.float64).copy()
     delta = np.asarray(action[:6], dtype=np.float64)
@@ -107,10 +141,22 @@ def run() -> None:
     parser.add_argument("--rot-scale", type=float, default=0.20)
     parser.add_argument("--preset", default="free_space")
     parser.add_argument("--mode", default=None, help="Defaults to the current service active_mode")
+    parser.add_argument("--calibrate-seconds", type=float, default=0.5, help="Keep the SpaceMouse still at startup to estimate zero bias")
+    parser.add_argument("--trans-deadzone", type=float, default=0.08, help="Deadzone for translation axes after bias removal")
+    parser.add_argument("--rot-deadzone", type=float, default=0.08, help="Deadzone for rotation axes after bias removal")
     args = parser.parse_args()
 
     client = R1LiteClient(args.server_url)
     expert = SpaceMouseExpert()
+    print(f"[teleop] calibrating SpaceMouse for {args.calibrate_seconds:.2f}s, keep it untouched...")
+    bias = _estimate_idle_bias(expert, args.calibrate_seconds)
+    print(f"[teleop] calibration complete")
+    print(f"[teleop] SpaceMouse bias: {np.array2string(bias, precision=4, suppress_small=True)}")
+    print(
+        "[teleop] deadzone config: "
+        f"trans={args.trans_deadzone:.3f}, rot={args.rot_deadzone:.3f}, "
+        f"xyz_scale={args.xyz_scale:.3f}, rot_scale={args.rot_scale:.3f}"
+    )
     seq = 0
     last_log_time = 0.0
     step_dt = 1.0 / max(args.hz, 1e-6)
@@ -121,6 +167,15 @@ def run() -> None:
             state = client.get_state()
             mode = args.mode or state["meta"]["mode"]
             action, buttons = expert.get_action()
+            action = _apply_deadzone(
+                np.asarray(action, dtype=np.float64) - bias,
+                trans_deadzone=args.trans_deadzone,
+                rot_deadzone=args.rot_deadzone,
+            )
+
+            if np.allclose(action, 0.0) and not _has_button_press(buttons):
+                time.sleep(max(0.0, step_dt - (time.time() - start_time)))
+                continue
 
             if args.arm == "dual":
                 if len(action) < 12:
