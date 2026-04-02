@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -49,7 +50,9 @@ class TrainConfig(DefaultTrainingConfig):
     setup_mode = "single-arm-learned-gripper"
     reward_neg = -0.05
     task_desc = "Move the R1Lite end effector to the target pose"
-    octo_path = "/root/online_rl/octo_model/octo-small"
+    # 优先使用外部显式指定的 Octo checkpoint；未指定时走 Octo 官方推荐的 HF 路径。
+    # `OctoModel.load_pretrained()` 会自动下载并缓存到当前用户可读目录。
+    octo_path = os.environ.get("OCTO_PATH", "hf://rail-berkeley/octo-small-1.5")
 
     def get_environment(self, fake_env=False, save_video=False, classifier=False, stack_obs_num=2):
         env = R1LiteArmEnv(arm=self.arm, config=EnvConfig())

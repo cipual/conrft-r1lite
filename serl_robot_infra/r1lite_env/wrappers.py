@@ -4,6 +4,7 @@ import gymnasium as gym
 import numpy as np
 
 from franka_env.spacemouse.spacemouse_expert import SpaceMouseExpert
+from r1lite_env.spacemouse_teleop import _apply_deadzone, _estimate_idle_bias
 
 
 class R1LiteObsWrapper(gym.ObservationWrapper):
@@ -121,16 +122,43 @@ class R1LiteTeleopInterventionWrapper(gym.ActionWrapper):
     One device controls a selected arm, two devices control both arms.
     """
 
-    def __init__(self, env, action_indices=None, arm="right"):
+    def __init__(
+        self,
+        env,
+        action_indices=None,
+        arm="right",
+        calibrate_seconds=0.5,
+        trans_deadzone=0.08,
+        rot_deadzone=0.08,
+    ):
         super().__init__(env)
         assert arm in ("left", "right", "dual")
         self.expert = SpaceMouseExpert()
         self.action_indices = action_indices
         self.arm = arm
+        self.trans_deadzone = trans_deadzone
+        self.rot_deadzone = rot_deadzone
         self.left1 = self.left2 = self.right1 = self.right2 = False
+        # 和直接 teleop 保持一致：启动时先做一次静置偏置估计，减少零点漂移。
+        print(
+            f"[teleop-wrapper] calibrating SpaceMouse for {calibrate_seconds:.2f}s, keep it untouched..."
+        )
+        self.bias = _estimate_idle_bias(self.expert, calibrate_seconds)
+        print("[teleop-wrapper] calibration complete")
+        print(
+            "[teleop-wrapper] bias="
+            f"{np.array2string(self.bias, precision=4, suppress_small=True)} "
+            f"deadzone(trans={self.trans_deadzone:.3f}, rot={self.rot_deadzone:.3f})"
+        )
 
     def action(self, action: np.ndarray) -> np.ndarray:
         expert_a, buttons = self.expert.get_action()
+        # 先去掉静置偏置，再套用 deadzone，和 spacemouse_teleop 的处理逻辑一致。
+        expert_a = _apply_deadzone(
+            np.asarray(expert_a, dtype=np.float64) - self.bias,
+            trans_deadzone=self.trans_deadzone,
+            rot_deadzone=self.rot_deadzone,
+        )
         mapped = np.zeros_like(action)
         self.left1 = self.left2 = self.right1 = self.right2 = False
 
@@ -209,3 +237,7 @@ class R1LiteTeleopInterventionWrapper(gym.ActionWrapper):
         info["right1"] = self.right1
         info["right2"] = self.right2
         return obs, rew, done, truncated, info
+
+    def close(self):
+        self.expert.close()
+        return super().close()

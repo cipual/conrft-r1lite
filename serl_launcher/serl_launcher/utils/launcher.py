@@ -11,7 +11,8 @@ from serl_launcher.common.wandb import WandBLogger
 from serl_launcher.agents.continuous.bc import BCAgent
 from serl_launcher.agents.continuous.sac import SACAgent
 from serl_launcher.agents.continuous.sac_single import SACAgentSingleArm
-from serl_launcher.serl_launcher.agents.continuous.conrft_single_octo_cp import ConrftCPOctoAgentSingleArm
+# ConRFT agent 与其他 agent 处于同一包层级，不需要重复写 serl_launcher 前缀。
+from serl_launcher.agents.continuous.conrft_single_octo_cp import ConrftCPOctoAgentSingleArm
 from serl_launcher.vision.data_augmentations import batched_random_crop
 
 ##############################################################################

@@ -15,6 +15,18 @@ The current end-to-end path is built around
 - control owner during HIL: `policy`
 - direct teleop owner: `teleop` with `teleop_source="spacemouse"`
 
+## 0. Activate The Environment
+
+Use the `RWRL` conda environment before running any of the scripts below:
+
+```bash
+source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+conda activate RWRL
+```
+
+The provided `run_*.sh` scripts export the required `PYTHONPATH` and a writable
+`MPLCONFIGDIR` automatically.
+
 ## 1. Start The Robot Service
 
 On the robot machine, start the R1Lite body service and verify that:
@@ -40,11 +52,28 @@ Key values to confirm:
 - `TrainConfig.arm`
 - `TrainConfig.image_keys`
 - `TrainConfig.task_desc`
+- `TrainConfig.octo_path`
 - target pose and thresholds in [wrapper.py](../examples/experiments/r1lite_reach_target/wrapper.py)
 
 Default control mode is `ee_pose_servo`, which is the recommended mode for the
 first end-to-end run because SpaceMouse commands are expressed as end-effector
 pose deltas.
+
+About `octo_path`:
+
+- the default value now follows the Octo repo recommendation:
+  `hf://rail-berkeley/octo-small-1.5`
+- `OctoModel.load_pretrained(...)` will download and cache the checkpoint under
+  the current user automatically
+- if you already have a local checkpoint, override it with:
+
+```bash
+export OCTO_PATH=/path/to/your/octo_checkpoint
+```
+
+- if you want to pre-download the model manually, the upstream Octo examples and
+  README use the same Hugging Face identifier:
+  `hf://rail-berkeley/octo-small-1.5`
 
 ## 3. Verify SpaceMouse Teleop
 
@@ -72,6 +101,14 @@ The dedicated script is:
 
 ```bash
 cd examples/experiments/r1lite_reach_target
+bash run_record_demos_octo.sh
+```
+
+If you want to force a specific local checkpoint for this step:
+
+```bash
+cd examples/experiments/r1lite_reach_target
+export OCTO_PATH=/path/to/your/octo_checkpoint
 bash run_record_demos_octo.sh
 ```
 
