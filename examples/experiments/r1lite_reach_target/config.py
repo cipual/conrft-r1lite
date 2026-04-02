@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -24,8 +24,8 @@ class EnvConfig(R1LiteEnvConfig):
     RANDOM_RESET: bool = False
     RANDOM_XY_RANGE: float = 0.015
     RANDOM_RZ_RANGE: float = 0.15
-    RESET_RIGHT_POSE: list = [0.35, 0.25, 0.32, 0.0, 1.0, 0.0, 0.0]
-    RESET_LEFT_POSE: list = [0.35, -0.25, 0.32, 0.0, 1.0, 0.0, 0.0]
+    RESET_RIGHT_POSE: list = field(default_factory=lambda: [0.35, 0.25, 0.32, 0.0, 1.0, 0.0, 0.0])
+    RESET_LEFT_POSE: list = field(default_factory=lambda: [0.35, -0.25, 0.32, 0.0, 1.0, 0.0, 0.0])
     ABS_POSE_LIMIT_LOW = {
         "left": [0.22, -0.42, 0.18, 0.0, -1.2, -1.2],
         "right": [0.22, 0.05, 0.18, 0.0, -1.2, -1.2],
