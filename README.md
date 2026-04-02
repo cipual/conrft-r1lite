@@ -4,6 +4,8 @@ This `README.md` is the running inference-side integration guide for `conrft-r1l
 
 The original research-oriented repository README has been preserved at [docs/research_readme_original.md](./docs/research_readme_original.md).
 
+For the current end-to-end R1Lite training path, use [docs/r1lite_walkthrough.md](./docs/r1lite_walkthrough.md).
+
 ## Service Address
 
 Set the robot service address first:
@@ -189,3 +191,53 @@ GUI refresh behavior:
 - `info` logs include owner changes, teleop source changes, brake changes, and SpaceMouse teleop activation
 - `warning` logs include freshness / validity warnings
 - `fault` logs include body-service faults and request failures
+
+## R1Lite Demo Pipeline
+
+The recommended first end-to-end task is `r1lite_reach_target`.
+
+Record demonstrations:
+
+```bash
+cd examples/experiments/r1lite_reach_target
+bash run_record_demos_octo.sh
+```
+
+Direct command:
+
+```bash
+cd examples
+python record_demos_r1lite_octo.py --exp_name=r1lite_reach_target --successes_needed=20
+```
+
+The recorded file is already ConRFT-ready and includes:
+
+- transition tuples
+- `mc_returns`
+- Octo `embeddings`
+- `next_embeddings`
+
+Default output directory:
+
+- `examples/experiments/r1lite_reach_target/demo_data`
+
+## R1Lite Training Scripts
+
+The reach-target experiment now includes dedicated launcher scripts:
+
+- [run_record_demos_octo.sh](./examples/experiments/r1lite_reach_target/run_record_demos_octo.sh)
+- [run_learner_conrft_pretrain.sh](./examples/experiments/r1lite_reach_target/run_learner_conrft_pretrain.sh)
+- [run_learner_conrft.sh](./examples/experiments/r1lite_reach_target/run_learner_conrft.sh)
+- [run_actor_conrft.sh](./examples/experiments/r1lite_reach_target/run_actor_conrft.sh)
+
+Minimal flow:
+
+```bash
+cd examples/experiments/r1lite_reach_target
+export DEMO_PATH=./demo_data/<demo_file>.pkl
+bash run_learner_conrft_pretrain.sh
+bash run_learner_conrft.sh
+bash run_actor_conrft.sh
+```
+
+Use `CHECKPOINT_PATH` to redirect checkpoints away from the default `./conrft`.

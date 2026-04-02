@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+import numpy as np
+
 from r1lite_env import (
     R1LiteArmEnv,
     R1LiteEnvConfig,
@@ -19,6 +21,19 @@ class EnvConfig(R1LiteEnvConfig):
     MAX_EPISODE_LENGTH: int = 80
     DEFAULT_MODE: str = "ee_pose_servo"
     DEFAULT_PRESET: str = "free_space"
+    RANDOM_RESET: bool = False
+    RANDOM_XY_RANGE: float = 0.015
+    RANDOM_RZ_RANGE: float = 0.15
+    RESET_RIGHT_POSE: list = [0.35, 0.25, 0.32, 0.0, 1.0, 0.0, 0.0]
+    RESET_LEFT_POSE: list = [0.35, -0.25, 0.32, 0.0, 1.0, 0.0, 0.0]
+    ABS_POSE_LIMIT_LOW = {
+        "left": [0.22, -0.42, 0.18, 0.0, -1.2, -1.2],
+        "right": [0.22, 0.05, 0.18, 0.0, -1.2, -1.2],
+    }
+    ABS_POSE_LIMIT_HIGH = {
+        "left": [0.55, -0.05, 0.45, np.pi, 1.2, 1.2],
+        "right": [0.55, 0.42, 0.45, np.pi, 1.2, 1.2],
+    }
 
 
 class TrainConfig(DefaultTrainingConfig):

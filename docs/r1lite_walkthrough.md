@@ -1,0 +1,166 @@
+# Training On R1Lite Walkthrough
+
+This walkthrough mirrors the official Franka pipeline, but uses the current
+R1Lite HTTP service, single-arm reach-target scaffold, and SpaceMouse
+intervention tooling in `conrft-r1lite`.
+
+## Scope
+
+The current end-to-end path is built around
+`examples/experiments/r1lite_reach_target`.
+
+- task: single-arm reach target
+- reward: geometric reward from end-effector pose error
+- teleoperation: SpaceMouse through `R1LiteTeleopInterventionWrapper`
+- control owner during HIL: `policy`
+- direct teleop owner: `teleop` with `teleop_source="spacemouse"`
+
+## 1. Start The Robot Service
+
+On the robot machine, start the R1Lite body service and verify that:
+
+- `GET /state` returns valid arm state and images
+- `GET /health` reports the expected `active_mode`
+- `POST /action` works for `owner="policy"`
+
+The inference-side quick checks are documented in [README.md](../README.md).
+
+## 2. Configure The Experiment
+
+Review [config.py](../examples/experiments/r1lite_reach_target/config.py).
+
+Key values to confirm:
+
+- `SERVER_URL`
+- `DEFAULT_MODE`
+- `DEFAULT_PRESET`
+- `RESET_LEFT_POSE` / `RESET_RIGHT_POSE`
+- `RANDOM_RESET`, `RANDOM_XY_RANGE`, `RANDOM_RZ_RANGE`
+- `ABS_POSE_LIMIT_LOW` / `ABS_POSE_LIMIT_HIGH`
+- `TrainConfig.arm`
+- `TrainConfig.image_keys`
+- `TrainConfig.task_desc`
+- target pose and thresholds in [wrapper.py](../examples/experiments/r1lite_reach_target/wrapper.py)
+
+Default control mode is `ee_pose_servo`, which is the recommended mode for the
+first end-to-end run because SpaceMouse commands are expressed as end-effector
+pose deltas.
+
+## 3. Verify SpaceMouse Teleop
+
+Before recording demos, verify direct teleoperation:
+
+```bash
+cd serl_robot_infra
+python -m r1lite_env.spacemouse_teleop --server-url "$ROBOT" --arm right
+```
+
+Recommended checks:
+
+- robot responds smoothly to 6DoF input
+- close/open buttons map to the configured gripper direction
+- `GET /health` shows `command_owner=teleop`
+- `GET /health` shows `active_teleop_source=spacemouse`
+
+If this fails, fix teleop first. Demo recording and HIL training both depend on
+the same SpaceMouse path.
+
+## 4. Record Demonstrations
+
+R1Lite demos are collected directly from the env, not from rosbag conversion.
+The dedicated script is:
+
+```bash
+cd examples/experiments/r1lite_reach_target
+bash run_record_demos_octo.sh
+```
+
+Equivalent direct command:
+
+```bash
+cd examples
+python record_demos_r1lite_octo.py \
+    --exp_name=r1lite_reach_target \
+    --successes_needed=20
+```
+
+What the script does:
+
+- creates the real R1Lite env
+- enables `R1LiteTeleopInterventionWrapper`
+- rolls out zero policy actions and records `info["intervene_action"]` when the
+  operator takes over
+- keeps only successful trajectories
+- adds `mc_returns`
+- adds Octo `embeddings`
+- adds `next_embeddings`
+- writes a ConRFT-ready `.pkl` file to
+  `examples/experiments/r1lite_reach_target/demo_data`
+
+## 5. Stage I: Cal-ConRFT Pretrain
+
+Set `DEMO_PATH` to the demo file recorded in the previous step:
+
+```bash
+cd examples/experiments/r1lite_reach_target
+export DEMO_PATH=./demo_data/r1lite_reach_target_20_demos_<timestamp>.pkl
+bash run_learner_conrft_pretrain.sh
+```
+
+This stage is learner-only. It uses the demonstration buffer to calibrate the
+policy before online exploration.
+
+Default script behavior:
+
+- `q_weight=0.1`
+- `bc_weight=1.0`
+- `pretrain_steps=20000`
+
+## 6. Stage II: HIL-ConRFT Online Training
+
+Run both threads:
+
+```bash
+cd examples/experiments/r1lite_reach_target
+export DEMO_PATH=./demo_data/r1lite_reach_target_20_demos_<timestamp>.pkl
+bash run_learner_conrft.sh
+bash run_actor_conrft.sh
+```
+
+During actor rollout:
+
+- the actor owns `owner="policy"`
+- SpaceMouse intervention happens inside the env wrapper
+- intervention transitions are inserted into the intervention/demo data store
+- online rollouts are mixed with offline demos by the learner
+
+Use SpaceMouse whenever the policy drifts or explores inefficiently.
+
+## 7. Recommended Files And Outputs
+
+Important inputs:
+
+- experiment config:
+  [config.py](../examples/experiments/r1lite_reach_target/config.py)
+- reward wrapper:
+  [wrapper.py](../examples/experiments/r1lite_reach_target/wrapper.py)
+- demo script:
+  [record_demos_r1lite_octo.py](../examples/record_demos_r1lite_octo.py)
+
+Expected outputs:
+
+- demos:
+  `examples/experiments/r1lite_reach_target/demo_data/*.pkl`
+- checkpoints:
+  `examples/experiments/r1lite_reach_target/conrft/`
+
+## 8. Current Gaps Compared To The Full Franka Workflow
+
+The current R1Lite path is intentionally simpler than the Franka banana task:
+
+- no classifier data collection step
+- no learned visual reward classifier for success detection
+- reward comes from geometric pose error
+
+This makes `r1lite_reach_target` the recommended first task for bringing up the
+full ConRFT actor/learner loop on R1Lite.

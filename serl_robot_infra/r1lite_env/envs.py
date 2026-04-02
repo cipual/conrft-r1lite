@@ -21,6 +21,21 @@ class R1LiteEnvConfig:
     RESET_LEFT_POSE: list = field(default_factory=lambda: [0.35, -0.25, 0.32, 0.0, 1.0, 0.0, 0.0])
     RESET_RIGHT_POSE: list = field(default_factory=lambda: [0.35, 0.25, 0.32, 0.0, 1.0, 0.0, 0.0])
     RESET_TORSO: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    RANDOM_RESET: bool = False
+    RANDOM_XY_RANGE: float = 0.0
+    RANDOM_RZ_RANGE: float = 0.0
+    ABS_POSE_LIMIT_LOW: Dict[str, list] = field(
+        default_factory=lambda: {
+            "left": [-np.inf, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf],
+            "right": [-np.inf, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf],
+        }
+    )
+    ABS_POSE_LIMIT_HIGH: Dict[str, list] = field(
+        default_factory=lambda: {
+            "left": [np.inf, np.inf, np.inf, np.inf, np.inf, np.inf],
+            "right": [np.inf, np.inf, np.inf, np.inf, np.inf, np.inf],
+        }
+    )
     IMAGE_KEYS: tuple = ("head", "left_wrist", "right_wrist")
     ARM_IMAGE_KEYS: Dict[str, tuple] = field(default_factory=lambda: {"left": ("head", "left_wrist"), "right": ("head", "right_wrist")})
 
@@ -33,6 +48,9 @@ class _BaseR1LiteEnv(gym.Env):
         self.max_episode_length = self.config.MAX_EPISODE_LENGTH
         self.curr_path_length = 0
         self.last_obs = None
+        self.random_reset = bool(self.config.RANDOM_RESET)
+        self.random_xy_range = float(self.config.RANDOM_XY_RANGE)
+        self.random_rz_range = float(self.config.RANDOM_RZ_RANGE)
 
     def _step_sleep(self, start_time: float):
         time.sleep(max(0.0, (1.0 / self.hz) - (time.time() - start_time)))
@@ -54,6 +72,34 @@ class _BaseR1LiteEnv(gym.Env):
             * Rotation.from_quat(tcp_pose[3:])
         ).as_quat()
         return pose
+
+    def _sample_reset_pose(self, arm: str) -> list:
+        if arm == "left":
+            pose = np.asarray(self.config.RESET_LEFT_POSE, dtype=np.float32).copy()
+        else:
+            pose = np.asarray(self.config.RESET_RIGHT_POSE, dtype=np.float32).copy()
+
+        if self.random_reset:
+            pose[:2] += np.random.uniform(-self.random_xy_range, self.random_xy_range, size=2).astype(np.float32)
+            euler = Rotation.from_quat(pose[3:]).as_euler("xyz")
+            euler[-1] += float(np.random.uniform(-self.random_rz_range, self.random_rz_range))
+            pose[3:] = Rotation.from_euler("xyz", euler).as_quat().astype(np.float32)
+
+        return self._clip_pose_to_safety_box(arm, pose).tolist()
+
+    def _clip_pose_to_safety_box(self, arm: str, pose: np.ndarray) -> np.ndarray:
+        clipped = np.asarray(pose, dtype=np.float32).copy()
+        lower = np.asarray(self.config.ABS_POSE_LIMIT_LOW[arm], dtype=np.float32)
+        upper = np.asarray(self.config.ABS_POSE_LIMIT_HIGH[arm], dtype=np.float32)
+
+        clipped[:3] = np.clip(clipped[:3], lower[:3], upper[:3])
+        euler = Rotation.from_quat(clipped[3:]).as_euler("xyz")
+
+        sign = np.sign(euler[0]) if euler[0] != 0 else 1.0
+        euler[0] = sign * np.clip(np.abs(euler[0]), lower[3], upper[3])
+        euler[1:] = np.clip(euler[1:], lower[4:], upper[4:])
+        clipped[3:] = Rotation.from_euler("xyz", euler).as_quat().astype(np.float32)
+        return clipped
 
 
 class R1LiteArmEnv(_BaseR1LiteEnv):
@@ -104,9 +150,9 @@ class R1LiteArmEnv(_BaseR1LiteEnv):
     def reset(self, **kwargs):
         self.curr_path_length = 0
         if self.arm == "left":
-            self.client.reset(left_pose=self.config.RESET_LEFT_POSE, torso=self.config.RESET_TORSO)
+            self.client.reset(left_pose=self._sample_reset_pose("left"), torso=self.config.RESET_TORSO)
         else:
-            self.client.reset(right_pose=self.config.RESET_RIGHT_POSE, torso=self.config.RESET_TORSO)
+            self.client.reset(right_pose=self._sample_reset_pose("right"), torso=self.config.RESET_TORSO)
         raw = self.client.get_state()
         obs = self._extract_obs(raw)
         self.last_obs = obs
@@ -114,10 +160,10 @@ class R1LiteArmEnv(_BaseR1LiteEnv):
 
     def step(self, action: np.ndarray):
         start_time = time.time()
-        action = np.asarray(action, dtype=np.float32)
+        action = np.clip(np.asarray(action, dtype=np.float32), self.action_space.low, self.action_space.high)
         raw = self.client.get_state()
         tcp_pose = np.asarray(raw["state"][self.arm]["tcp_pose"], dtype=np.float32)
-        pose_target = self._target_pose_from_action(tcp_pose, action[:6])
+        pose_target = self._clip_pose_to_safety_box(self.arm, self._target_pose_from_action(tcp_pose, action[:6]))
         payload = {
             "mode": self.config.DEFAULT_MODE,
             "owner": "policy",
@@ -209,8 +255,8 @@ class DualR1LiteEnv(_BaseR1LiteEnv):
     def reset(self, **kwargs):
         self.curr_path_length = 0
         self.client.reset(
-            left_pose=self.config.RESET_LEFT_POSE,
-            right_pose=self.config.RESET_RIGHT_POSE,
+            left_pose=self._sample_reset_pose("left"),
+            right_pose=self._sample_reset_pose("right"),
             torso=self.config.RESET_TORSO,
         )
         raw = self.client.get_state()
@@ -220,12 +266,18 @@ class DualR1LiteEnv(_BaseR1LiteEnv):
 
     def step(self, action: np.ndarray):
         start_time = time.time()
-        action = np.asarray(action, dtype=np.float32)
+        action = np.clip(np.asarray(action, dtype=np.float32), self.action_space.low, self.action_space.high)
         raw = self.client.get_state()
         left_action = action[:7]
         right_action = action[7:]
-        left_pose = self._target_pose_from_action(np.asarray(raw["state"]["left"]["tcp_pose"], dtype=np.float32), left_action[:6])
-        right_pose = self._target_pose_from_action(np.asarray(raw["state"]["right"]["tcp_pose"], dtype=np.float32), right_action[:6])
+        left_pose = self._clip_pose_to_safety_box(
+            "left",
+            self._target_pose_from_action(np.asarray(raw["state"]["left"]["tcp_pose"], dtype=np.float32), left_action[:6]),
+        )
+        right_pose = self._clip_pose_to_safety_box(
+            "right",
+            self._target_pose_from_action(np.asarray(raw["state"]["right"]["tcp_pose"], dtype=np.float32), right_action[:6]),
+        )
         payload = {
             "mode": self.config.DEFAULT_MODE,
             "owner": "policy",

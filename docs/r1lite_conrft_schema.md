@@ -58,10 +58,21 @@ Semantics:
 
 The env converts the action to the current R1Lite HTTP payload:
 
-- `pose_target`: current TCP pose plus scaled delta
+- `pose_target`: current TCP pose plus scaled delta, then clipped to the configured per-arm safety box before publish
 - `gripper`: `clip((action[6] + 1) * 50, 0, 100)`
 - `preset`: default `free_space`
 - `owner`: `policy`
+
+The maintained R1Lite env now follows the Franka env pattern for:
+
+- fixed reset pose with optional randomization around the reset center
+- per-arm Cartesian/orientation safety limits in env space
+- policy-side HIL intervention through the env wrapper layer
+- reset poses are forwarded through `/reset` and clipped again on the robot service side
+
+For `r1lite_reach_target`, the default config keeps `RANDOM_RESET = False` for
+bring-up, but exposes the same `RANDOM_XY_RANGE` / `RANDOM_RZ_RANGE` interface
+as the official Franka tasks.
 
 ## Demo transition schema
 
@@ -102,3 +113,15 @@ Default target pose:
 
 - right arm: `[0.43, 0.20, 0.28, 0.0, 1.0, 0.0, 0.0]`
 - left arm: `[0.43, -0.20, 0.28, 0.0, 1.0, 0.0, 0.0]`
+
+## Recommended R1Lite workflow
+
+For the maintained end-to-end flow, use:
+
+- walkthrough: [r1lite_walkthrough.md](./r1lite_walkthrough.md)
+- demo recording entry point: [record_demos_r1lite_octo.py](../examples/record_demos_r1lite_octo.py)
+- experiment launchers:
+  [run_record_demos_octo.sh](../examples/experiments/r1lite_reach_target/run_record_demos_octo.sh),
+  [run_learner_conrft_pretrain.sh](../examples/experiments/r1lite_reach_target/run_learner_conrft_pretrain.sh),
+  [run_learner_conrft.sh](../examples/experiments/r1lite_reach_target/run_learner_conrft.sh),
+  [run_actor_conrft.sh](../examples/experiments/r1lite_reach_target/run_actor_conrft.sh)
