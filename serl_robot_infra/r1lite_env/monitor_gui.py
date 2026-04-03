@@ -8,6 +8,7 @@ from typing import Dict, Optional
 import cv2
 import numpy as np
 import requests
+from scipy.spatial.transform import Rotation
 
 from r1lite_env.client import R1LiteClient, decode_image_base64
 
@@ -25,6 +26,32 @@ def _format_vector(value) -> str:
         return "-"
     arr = np.asarray(value, dtype=np.float64).reshape(-1)
     return "[" + ", ".join(f"{float(v): .3f}" for v in arr) + "]"
+
+
+def _format_tcp_pose_with_euler(value) -> str:
+    if value is None:
+        return "-"
+    arr = np.asarray(value, dtype=np.float64).reshape(-1)
+    if arr.size != 7:
+        return _format_vector(arr)
+    xyz = arr[:3]
+    quat = arr[3:]
+    try:
+        euler = Rotation.from_quat(quat).as_euler("xyz")
+        return (
+            f"xyz={_format_vector(xyz)}\n"
+            f"quat={_format_vector(quat)}\n"
+            f"rpy={_format_vector(euler)}"
+        )
+    except ValueError:
+        return f"xyz={_format_vector(xyz)}\nquat={_format_vector(quat)}"
+
+
+def _split_last_sent_target(value) -> str:
+    if value is None:
+        return "-"
+    text = str(value)
+    return text.replace("; ", "\n")
 
 
 def _make_ppm_image(rgb: np.ndarray) -> bytes:
@@ -374,10 +401,10 @@ class R1LiteMonitorGUI:
             f"teleop_source: {_format_scalar(teleop_source)}",
             f"preset: {_format_scalar(command.get('preset'))}",
             f"gripper_target: {_format_scalar(command.get('gripper'))}",
-            f"tcp_target: {_format_vector(command.get('desired_pose'))}",
+            f"tcp_target:\n{_format_tcp_pose_with_euler(command.get('desired_pose'))}",
             f"joint_target: {_format_vector(command.get('desired_joint'))}",
             f"updated_at: {_format_scalar(command.get('updated_at'))}",
-            f"last_sent: {_format_scalar(command.get('last_sent_target'))}",
+            f"last_sent:\n{_split_last_sent_target(command.get('last_sent_target'))}",
         ]
         return "\n".join(lines)
 
@@ -388,7 +415,7 @@ class R1LiteMonitorGUI:
             f"joint_vel: {_format_vector(arm_state.get('joint_vel'))}",
             f"joint_effort: {_format_vector(arm_state.get('joint_effort'))}",
             f"gripper_pose: {_format_vector(arm_state.get('gripper_pose'))}",
-            f"tcp_pose: {_format_vector(arm_state.get('tcp_pose'))}",
+            f"tcp_pose:\n{_format_tcp_pose_with_euler(arm_state.get('tcp_pose'))}",
             f"tcp_vel: {_format_vector(arm_state.get('tcp_vel'))}",
             f"tcp_force: {_format_vector(arm_state.get('tcp_force'))}",
             f"tcp_torque: {_format_vector(arm_state.get('tcp_torque'))}",

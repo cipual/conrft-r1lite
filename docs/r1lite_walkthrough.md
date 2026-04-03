@@ -27,6 +27,12 @@ conda activate RWRL
 The provided `run_*.sh` scripts export the required `PYTHONPATH` and a writable
 `MPLCONFIGDIR` automatically.
 
+Set the robot service address before demo collection or training:
+
+```bash
+export ROBOT=http://192.168.12.12:8001
+```
+
 ## 1. Start The Robot Service
 
 On the robot machine, start the R1Lite body service and verify that:
@@ -39,7 +45,9 @@ The inference-side quick checks are documented in [README.md](../README.md).
 
 ## 2. Configure The Experiment
 
-Review [config.py](../examples/experiments/r1lite_reach_target/config.py).
+Review [config.yaml](../examples/experiments/r1lite_reach_target/config.yaml) first.
+The Python file [config.py](../examples/experiments/r1lite_reach_target/config.py)
+now mainly contains loading logic and wrapper wiring.
 
 Key values to confirm:
 
@@ -47,17 +55,33 @@ Key values to confirm:
 - `DEFAULT_MODE`
 - `DEFAULT_PRESET`
 - `RESET_LEFT_POSE` / `RESET_RIGHT_POSE`
+- `reset_left_joint` / `reset_right_joint`
+- `env.reset_settle_sec`
+- reset completion thresholds under `env.reset_*`
 - `RANDOM_RESET`, `RANDOM_XY_RANGE`, `RANDOM_RZ_RANGE`
 - `ABS_POSE_LIMIT_LOW` / `ABS_POSE_LIMIT_HIGH`
 - `TrainConfig.arm`
 - `TrainConfig.image_keys`
+- `train.setup_mode`
 - `TrainConfig.task_desc`
 - `TrainConfig.octo_path`
-- target pose and thresholds in [wrapper.py](../examples/experiments/r1lite_reach_target/wrapper.py)
+- `task.target_left_pose` / `task.target_right_pose`
+- `task.position_tolerance_m` / `task.orientation_tolerance_rad`
+- `task.success_reward` and dense reward weights
+- `teleop.calibrate_seconds`, `teleop.trans_deadzone`, `teleop.rot_deadzone`
+- `teleop.activate_threshold` / `teleop.release_threshold`
+- `gripper.fixed_open` / `gripper.open_value`
 
 Default control mode is `ee_pose_servo`, which is the recommended mode for the
 first end-to-end run because SpaceMouse commands are expressed as end-effector
 pose deltas.
+
+About `SERVER_URL`:
+
+- `r1lite_reach_target` now reads `SERVER_URL` from the `ROBOT` environment
+  variable first
+- if `ROBOT` is unset, it falls back to `http://127.0.0.1:8001/`
+- otherwise the default comes from `config.yaml`
 
 About `octo_path`:
 
@@ -75,6 +99,14 @@ export OCTO_PATH=/path/to/your/octo_checkpoint
   README use the same Hugging Face identifier:
   `hf://rail-berkeley/octo-small-1.5`
 
+Advanced note:
+
+- if you want to use a different experiment config file entirely, set:
+
+```bash
+export R1LITE_REACH_CONFIG=/path/to/your/config.yaml
+```
+
 ## 3. Verify SpaceMouse Teleop
 
 Before recording demos, verify direct teleoperation:
@@ -87,7 +119,7 @@ python -m r1lite_env.spacemouse_teleop --server-url "$ROBOT" --arm right
 Recommended checks:
 
 - robot responds smoothly to 6DoF input
-- close/open buttons map to the configured gripper direction
+- if `gripper.fixed_open=true`, the reach task keeps the gripper open and ignores SpaceMouse gripper buttons during demo recording
 - `GET /health` shows `command_owner=teleop`
 - `GET /health` shows `active_teleop_source=spacemouse`
 

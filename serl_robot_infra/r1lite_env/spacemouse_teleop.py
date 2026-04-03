@@ -67,6 +67,15 @@ def _dual_arm_grippers(buttons) -> Tuple[Optional[float], Optional[float]]:
     return left, right
 
 
+def _pose_matches(raw_pose: np.ndarray, accepted_pose: np.ndarray, atol: float = 1e-4) -> bool:
+    return bool(np.allclose(np.asarray(raw_pose, dtype=np.float64), np.asarray(accepted_pose, dtype=np.float64), atol=atol))
+
+
+def _format_pose(pose: np.ndarray) -> str:
+    pose = np.asarray(pose, dtype=np.float64)
+    return np.array2string(pose, precision=4, suppress_small=True)
+
+
 def _build_single_arm_payload(
     state: Dict,
     arm: str,
@@ -144,6 +153,17 @@ def run() -> None:
     parser.add_argument("--calibrate-seconds", type=float, default=0.5, help="Keep the SpaceMouse still at startup to estimate zero bias")
     parser.add_argument("--trans-deadzone", type=float, default=0.08, help="Deadzone for translation axes after bias removal")
     parser.add_argument("--rot-deadzone", type=float, default=0.08, help="Deadzone for rotation axes after bias removal")
+    parser.add_argument(
+        "--debug-target-pose",
+        action="store_true",
+        help="Print the raw pose target, the pose accepted by the server, and whether they match.",
+    )
+    parser.add_argument(
+        "--debug-log-hz",
+        type=float,
+        default=2.0,
+        help="Maximum debug print frequency for target-pose comparison.",
+    )
     args = parser.parse_args()
 
     client = R1LiteClient(args.server_url)
@@ -159,6 +179,7 @@ def run() -> None:
     )
     seq = 0
     last_log_time = 0.0
+    last_debug_time = 0.0
     step_dt = 1.0 / max(args.hz, 1e-6)
 
     try:
@@ -180,6 +201,18 @@ def run() -> None:
             if args.arm == "dual":
                 if len(action) < 12:
                     raise RuntimeError("dual arm teleop requires two SpaceMouse devices")
+                left_raw_pose = _pose_target_from_action(
+                    np.asarray(state["state"]["left"]["tcp_pose"], dtype=np.float64),
+                    action[:6],
+                    args.xyz_scale,
+                    args.rot_scale,
+                )
+                right_raw_pose = _pose_target_from_action(
+                    np.asarray(state["state"]["right"]["tcp_pose"], dtype=np.float64),
+                    action[6:12],
+                    args.xyz_scale,
+                    args.rot_scale,
+                )
                 payload = _build_dual_arm_payload(
                     state=state,
                     action=action,
@@ -193,6 +226,12 @@ def run() -> None:
             else:
                 if len(action) < 6:
                     raise RuntimeError("failed to read a valid SpaceMouse 6DoF action")
+                raw_pose = _pose_target_from_action(
+                    np.asarray(state["state"][args.arm]["tcp_pose"], dtype=np.float64),
+                    action[:6],
+                    args.xyz_scale,
+                    args.rot_scale,
+                )
                 payload = _build_single_arm_payload(
                     state=state,
                     arm=args.arm,
@@ -212,6 +251,39 @@ def run() -> None:
                     f"published={response.get('published')}"
                 )
                 last_log_time = time.time()
+
+            if args.debug_target_pose and (time.time() - last_debug_time) >= (1.0 / max(args.debug_log_hz, 1e-6)):
+                health = client.get_health()
+                commands = health.get("commands", {})
+                if args.arm == "dual":
+                    accepted_left = commands.get("left", {}).get("desired_pose")
+                    accepted_right = commands.get("right", {}).get("desired_pose")
+                    if accepted_left is not None and accepted_right is not None:
+                        accepted_left = np.asarray(accepted_left, dtype=np.float64)
+                        accepted_right = np.asarray(accepted_right, dtype=np.float64)
+                        left_match = _pose_matches(left_raw_pose, accepted_left)
+                        right_match = _pose_matches(right_raw_pose, accepted_right)
+                        print(
+                            "[teleop-debug] left raw="
+                            f"{_format_pose(left_raw_pose)} accepted={_format_pose(accepted_left)} "
+                            f"match={left_match} clipped={not left_match}"
+                        )
+                        print(
+                            "[teleop-debug] right raw="
+                            f"{_format_pose(right_raw_pose)} accepted={_format_pose(accepted_right)} "
+                            f"match={right_match} clipped={not right_match}"
+                        )
+                else:
+                    accepted_pose = commands.get(args.arm, {}).get("desired_pose")
+                    if accepted_pose is not None:
+                        accepted_pose = np.asarray(accepted_pose, dtype=np.float64)
+                        matches = _pose_matches(raw_pose, accepted_pose)
+                        print(
+                            "[teleop-debug] raw="
+                            f"{_format_pose(raw_pose)} accepted={_format_pose(accepted_pose)} "
+                            f"match={matches} clipped={not matches}"
+                        )
+                last_debug_time = time.time()
             seq += 1
             time.sleep(max(0.0, step_dt - (time.time() - start_time)))
     finally:

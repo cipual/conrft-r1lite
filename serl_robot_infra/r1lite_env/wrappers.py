@@ -1,10 +1,29 @@
 import copy
+import time
 
 import gymnasium as gym
 import numpy as np
 
 from franka_env.spacemouse.spacemouse_expert import SpaceMouseExpert
-from r1lite_env.spacemouse_teleop import _apply_deadzone, _estimate_idle_bias
+from r1lite_env.spacemouse_teleop import _apply_deadzone
+
+
+def _estimate_idle_bias_robust(expert: SpaceMouseExpert, duration_sec: float) -> np.ndarray:
+    if duration_sec <= 0.0:
+        action, _ = expert.get_action()
+        return np.zeros_like(np.asarray(action, dtype=np.float64))
+
+    deadline = time.time() + duration_sec
+    samples = []
+    while time.time() < deadline:
+        action, _ = expert.get_action()
+        samples.append(np.asarray(action, dtype=np.float64))
+        time.sleep(0.01)
+    if not samples:
+        action, _ = expert.get_action()
+        return np.zeros_like(np.asarray(action, dtype=np.float64))
+    # 用中位数而不是均值做零点估计，对偶发尖峰和启动抖动更稳。
+    return np.median(np.stack(samples, axis=0), axis=0)
 
 
 class R1LiteObsWrapper(gym.ObservationWrapper):
@@ -127,28 +146,36 @@ class R1LiteTeleopInterventionWrapper(gym.ActionWrapper):
         env,
         action_indices=None,
         arm="right",
-        calibrate_seconds=0.5,
-        trans_deadzone=0.08,
-        rot_deadzone=0.08,
+        gripper_enabled=True,
+        calibrate_seconds=1.0,
+        trans_deadzone=0.12,
+        rot_deadzone=0.12,
+        activate_threshold=0.15,
+        release_threshold=0.05,
     ):
         super().__init__(env)
         assert arm in ("left", "right", "dual")
         self.expert = SpaceMouseExpert()
         self.action_indices = action_indices
         self.arm = arm
+        self.gripper_enabled = gripper_enabled
         self.trans_deadzone = trans_deadzone
         self.rot_deadzone = rot_deadzone
+        self.activate_threshold = activate_threshold
+        self.release_threshold = release_threshold
+        self.intervention_active = False
         self.left1 = self.left2 = self.right1 = self.right2 = False
-        # 和直接 teleop 保持一致：启动时先做一次静置偏置估计，减少零点漂移。
+        # demo 录制更怕零飘，这里使用更稳的中位数校准，并适当拉长校准时间。
         print(
             f"[teleop-wrapper] calibrating SpaceMouse for {calibrate_seconds:.2f}s, keep it untouched..."
         )
-        self.bias = _estimate_idle_bias(self.expert, calibrate_seconds)
+        self.bias = _estimate_idle_bias_robust(self.expert, calibrate_seconds)
         print("[teleop-wrapper] calibration complete")
         print(
             "[teleop-wrapper] bias="
             f"{np.array2string(self.bias, precision=4, suppress_small=True)} "
-            f"deadzone(trans={self.trans_deadzone:.3f}, rot={self.rot_deadzone:.3f})"
+            f"deadzone(trans={self.trans_deadzone:.3f}, rot={self.rot_deadzone:.3f}) "
+            f"hysteresis(activate={self.activate_threshold:.3f}, release={self.release_threshold:.3f})"
         )
 
     def action(self, action: np.ndarray) -> np.ndarray:
@@ -169,14 +196,15 @@ class R1LiteTeleopInterventionWrapper(gym.ActionWrapper):
             mapped[7:13] = expert_a[6:12]
             if len(buttons) == 4:
                 self.left1, self.left2, self.right1, self.right2 = tuple(buttons)
-            if self.left1:
-                mapped[6] = -1.0
-            elif self.left2:
-                mapped[6] = 1.0
-            if self.right1:
-                mapped[13] = -1.0
-            elif self.right2:
-                mapped[13] = 1.0
+            if self.gripper_enabled:
+                if self.left1:
+                    mapped[6] = -1.0
+                elif self.left2:
+                    mapped[6] = 1.0
+                if self.right1:
+                    mapped[13] = -1.0
+                elif self.right2:
+                    mapped[13] = 1.0
         else:
             if len(expert_a) < 6:
                 return action, False
@@ -194,30 +222,40 @@ class R1LiteTeleopInterventionWrapper(gym.ActionWrapper):
             open_pressed = len(buttons) >= 2 and buttons[-1]
             if self.arm == "left":
                 self.left1, self.left2 = close_pressed, open_pressed
-                if mapped.shape[0] >= 14:
-                    if self.left1:
-                        mapped[6] = -1.0
-                    elif self.left2:
-                        mapped[6] = 1.0
-                elif mapped.shape[0] >= 7:
-                    if self.left1:
-                        mapped[6] = -1.0
-                    elif self.left2:
-                        mapped[6] = 1.0
+                if self.gripper_enabled:
+                    if mapped.shape[0] >= 14:
+                        if self.left1:
+                            mapped[6] = -1.0
+                        elif self.left2:
+                            mapped[6] = 1.0
+                    elif mapped.shape[0] >= 7:
+                        if self.left1:
+                            mapped[6] = -1.0
+                        elif self.left2:
+                            mapped[6] = 1.0
             else:
                 self.right1, self.right2 = close_pressed, open_pressed
-                if mapped.shape[0] >= 14:
-                    if self.right1:
-                        mapped[13] = -1.0
-                    elif self.right2:
-                        mapped[13] = 1.0
-                elif mapped.shape[0] >= 7:
-                    if self.right1:
-                        mapped[6] = -1.0
-                    elif self.right2:
-                        mapped[6] = 1.0
+                if self.gripper_enabled:
+                    if mapped.shape[0] >= 14:
+                        if self.right1:
+                            mapped[13] = -1.0
+                        elif self.right2:
+                            mapped[13] = 1.0
+                    elif mapped.shape[0] >= 7:
+                        if self.right1:
+                            mapped[6] = -1.0
+                        elif self.right2:
+                            mapped[6] = 1.0
 
-        intervened = np.linalg.norm(mapped) > 1e-3
+        motion_norm = float(np.linalg.norm(mapped))
+        # fixed-gripper 任务下忽略 SpaceMouse 按钮，避免无意触发 intervention。
+        button_pressed = self.gripper_enabled and any(bool(v) for v in buttons)
+        # 使用滞回阈值抑制零飘：只有明显输入才接管，释放时则更早回到 policy。
+        if self.intervention_active:
+            intervened = button_pressed or motion_norm > self.release_threshold
+        else:
+            intervened = button_pressed or motion_norm > self.activate_threshold
+        self.intervention_active = intervened
 
         if self.action_indices is not None:
             filtered = np.zeros_like(mapped)

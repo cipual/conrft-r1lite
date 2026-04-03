@@ -9,7 +9,7 @@ from scipy.spatial.transform import Rotation
 class ReachTargetTaskConfig:
     arm: str = "right"
     target_left_pose: tuple = (0.43, -0.20, 0.28, 0.0, 1.0, 0.0, 0.0)
-    target_right_pose: tuple = (0.43, 0.20, 0.28, 0.0, 1.0, 0.0, 0.0)
+    target_right_pose: tuple = (0.332, -0.357, 0.280, 0.011, 0.656, -0.019, 0.754)
     position_tolerance_m: float = 0.03
     orientation_tolerance_rad: float = 0.35
     success_reward: float = 10.0

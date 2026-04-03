@@ -1,7 +1,9 @@
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
+import yaml
 
 from r1lite_env import (
     R1LiteArmEnv,
@@ -16,30 +18,76 @@ from experiments.config import DefaultTrainingConfig
 from experiments.r1lite_reach_target.wrapper import ReachTargetRewardWrapper, ReachTargetTaskConfig
 
 
+_CONFIG_DIR = Path(__file__).resolve().parent
+_CONFIG_PATH = Path(os.environ.get("R1LITE_REACH_CONFIG", _CONFIG_DIR / "config.yaml"))
+
+
+def _load_user_config() -> dict:
+    if not _CONFIG_PATH.exists():
+        return {}
+    with _CONFIG_PATH.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid config file format: {_CONFIG_PATH}")
+    return data
+
+
+_USER_CONFIG = _load_user_config()
+
+
+def _cfg(path: str, default):
+    current = _USER_CONFIG
+    for key in path.split("."):
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
 @dataclass
 class EnvConfig(R1LiteEnvConfig):
-    SERVER_URL: str = "http://127.0.0.1:8001/"
-    MAX_EPISODE_LENGTH: int = 80
-    DEFAULT_MODE: str = "ee_pose_servo"
-    DEFAULT_PRESET: str = "free_space"
-    RANDOM_RESET: bool = False
-    RANDOM_XY_RANGE: float = 0.015
-    RANDOM_RZ_RANGE: float = 0.15
-    RESET_RIGHT_POSE: list = field(default_factory=lambda: [0.35, 0.25, 0.32, 0.0, 1.0, 0.0, 0.0])
-    RESET_LEFT_POSE: list = field(default_factory=lambda: [0.35, -0.25, 0.32, 0.0, 1.0, 0.0, 0.0])
-    ABS_POSE_LIMIT_LOW = {
-        "left": [0.22, -0.42, 0.18, 0.0, -1.2, -1.2],
-        "right": [0.22, 0.05, 0.18, 0.0, -1.2, -1.2],
-    }
-    ABS_POSE_LIMIT_HIGH = {
-        "left": [0.55, -0.05, 0.45, np.pi, 1.2, 1.2],
-        "right": [0.55, 0.42, 0.45, np.pi, 1.2, 1.2],
-    }
+    # 优先从环境变量 ROBOT 读取机器人服务地址，便于在不同机器之间切换。
+    SERVER_URL: str = os.environ.get("ROBOT", _cfg("env.server_url", "http://127.0.0.1:8001/"))
+    MAX_EPISODE_LENGTH: int = int(_cfg("env.max_episode_length", 80))
+    DEFAULT_MODE: str = _cfg("env.default_mode", "ee_pose_servo")
+    DEFAULT_PRESET: str = _cfg("env.default_preset", "free_space")
+    RANDOM_RESET: bool = bool(_cfg("env.random_reset", False))
+    RANDOM_XY_RANGE: float = float(_cfg("env.random_xy_range", 0.015))
+    RANDOM_RZ_RANGE: float = float(_cfg("env.random_rz_range", 0.15))
+    RESET_SETTLE_SEC: float = float(_cfg("env.reset_settle_sec", 1.5))
+    RESET_WAIT_TIMEOUT_SEC: float = float(_cfg("env.reset_wait_timeout_sec", 6.0))
+    RESET_POLL_SEC: float = float(_cfg("env.reset_poll_sec", 0.1))
+    RESET_STABLE_COUNT: int = int(_cfg("env.reset_stable_count", 4))
+    RESET_POSITION_TOLERANCE_M: float = float(_cfg("env.reset_position_tolerance_m", 0.03))
+    RESET_ORIENTATION_TOLERANCE_RAD: float = float(_cfg("env.reset_orientation_tolerance_rad", 0.35))
+    RESET_JOINT_TOLERANCE_RAD: float = float(_cfg("env.reset_joint_tolerance_rad", 0.08))
+    RESET_STABLE_POS_EPS_M: float = float(_cfg("env.reset_stable_pos_eps_m", 0.005))
+    RESET_STABLE_ORI_EPS_RAD: float = float(_cfg("env.reset_stable_ori_eps_rad", 0.08))
+    RESET_STABLE_JOINT_EPS_RAD: float = float(_cfg("env.reset_stable_joint_eps_rad", 0.03))
+    # 这里约定“全 0”表示不要发末端 pose reset，而是回落到服务端默认关节 reset。
+    RESET_RIGHT_POSE: list = field(default_factory=lambda: list(_cfg("env.reset_right_pose", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])))
+    RESET_LEFT_POSE: list = field(default_factory=lambda: list(_cfg("env.reset_left_pose", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])))
+    RESET_RIGHT_JOINT: list = field(default_factory=lambda: list(_cfg("env.reset_right_joint", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])))
+    RESET_LEFT_JOINT: list = field(default_factory=lambda: list(_cfg("env.reset_left_joint", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])))
+    ABS_POSE_LIMIT_LOW: dict = field(
+        default_factory=lambda: {
+            "left": list(_cfg("env.abs_pose_limit_low.left", [0.22, -0.42, 0.18, 0.0, -1.2, -1.2])),
+            "right": list(_cfg("env.abs_pose_limit_low.right", [-0.10, -0.85, 0.27, 0.0, 0.0, -1.2])),
+        }
+    )
+    ABS_POSE_LIMIT_HIGH: dict = field(
+        default_factory=lambda: {
+            "left": list(_cfg("env.abs_pose_limit_high.left", [0.55, -0.05, 0.45, float(np.pi), 1.2, 1.2])),
+            "right": list(_cfg("env.abs_pose_limit_high.right", [0.60, -0.19, 0.70, float(np.pi), 1.4, 1.2])),
+        }
+    )
+    FIX_GRIPPER_OPEN: bool = bool(_cfg("gripper.fixed_open", True))
+    FIXED_GRIPPER_VALUE: float = float(_cfg("gripper.open_value", 100.0))
 
 
 class TrainConfig(DefaultTrainingConfig):
-    arm = "right"
-    image_keys = ["image_primary", "image_wrist"]
+    arm = _cfg("train.arm", "right")
+    image_keys = list(_cfg("train.image_keys", ["image_primary", "image_wrist"])) # 头部相机 + 腕部相机
     proprio_keys = ["tcp_pose", "tcp_vel", "tcp_force", "tcp_torque", "gripper_pose"]
     checkpoint_period = 2000
     cta_ratio = 2
@@ -47,23 +95,45 @@ class TrainConfig(DefaultTrainingConfig):
     discount = 0.98
     buffer_period = 1000
     encoder_type = "resnet-pretrained"
-    setup_mode = "single-arm-learned-gripper"
+    # 参考 Franka reach / pregrasp 场景：当前任务不学习夹爪，策略只关心 6DoF 末端动作。
+    setup_mode = _cfg("train.setup_mode", "single-arm-fixed-gripper")
     reward_neg = -0.05
-    task_desc = "Move the R1Lite end effector to the target pose"
+    task_desc = _cfg("train.task_desc", "Move the R1Lite end effector to the target pose") # 输入 vla 的 instruction
     # 优先使用外部显式指定的 Octo checkpoint；未指定时走 Octo 官方推荐的 HF 路径。
     # `OctoModel.load_pretrained()` 会自动下载并缓存到当前用户可读目录。
-    octo_path = os.environ.get("OCTO_PATH", "hf://rail-berkeley/octo-small-1.5")
+    octo_path = os.environ.get("OCTO_PATH", _cfg("train.octo_path", "hf://rail-berkeley/octo-small-1.5"))
+    task_config = ReachTargetTaskConfig(
+        arm=_cfg("train.arm", "right"),
+        target_left_pose=tuple(_cfg("task.target_left_pose", [0.43, -0.20, 0.28, 0.0, 1.0, 0.0, 0.0])),
+        target_right_pose=tuple(_cfg("task.target_right_pose", [0.332, -0.357, 0.280, 0.011, 0.656, -0.019, 0.754])),
+        position_tolerance_m=float(_cfg("task.position_tolerance_m", 0.03)),
+        orientation_tolerance_rad=float(_cfg("task.orientation_tolerance_rad", 0.35)),
+        success_reward=float(_cfg("task.success_reward", 10.0)),
+        dense_position_weight=float(_cfg("task.dense_position_weight", 1.0)),
+        dense_orientation_weight=float(_cfg("task.dense_orientation_weight", 0.1)),
+        reward_neg=float(_cfg("task.reward_neg", -0.05)),
+    )
+    teleop_config = {
+        "calibrate_seconds": float(_cfg("teleop.calibrate_seconds", 0.5)),
+        "trans_deadzone": float(_cfg("teleop.trans_deadzone", 0.08)),
+        "rot_deadzone": float(_cfg("teleop.rot_deadzone", 0.08)),
+        # 对齐独立 teleop：默认几乎不做额外 intervention 滞回。
+        "activate_threshold": float(_cfg("teleop.activate_threshold", 1e-3)),
+        "release_threshold": float(_cfg("teleop.release_threshold", 1e-3)),
+    }
 
     def get_environment(self, fake_env=False, save_video=False, classifier=False, stack_obs_num=2):
         env = R1LiteArmEnv(arm=self.arm, config=EnvConfig())
         if not fake_env:
-            env = R1LiteTeleopInterventionWrapper(env, arm=self.arm)
+            env = R1LiteTeleopInterventionWrapper(
+                env,
+                arm=self.arm,
+                gripper_enabled=not EnvConfig().FIX_GRIPPER_OPEN,
+                **self.teleop_config,
+            )
         env = ReachTargetRewardWrapper(
             env,
-            ReachTargetTaskConfig(
-                arm=self.arm,
-                reward_neg=self.reward_neg,
-            ),
+            self.task_config,
         )
         env = R1LiteSingleArmConRFTObsWrapper(env)
         env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)

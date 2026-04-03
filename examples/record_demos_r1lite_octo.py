@@ -41,15 +41,17 @@ def _default_output_dir(exp_name: str) -> str:
 def main(_):
     assert FLAGS.exp_name in CONFIG_MAPPING, "Experiment folder not found."
     config = CONFIG_MAPPING[FLAGS.exp_name]()
+
+    # 先加载 Octo，再创建带 SpaceMouse wrapper 的 env。
+    # 否则 SpaceMouse 会过早校准，等模型加载完成后再开始录制时零偏可能已经漂了。
+    model = OctoModel.load_pretrained(config.octo_path)
+    tasks = model.create_tasks(texts=[config.task_desc])
     env = config.get_environment(
         fake_env=False,
         save_video=False,
         classifier=True,
         stack_obs_num=2,
     )
-
-    model = OctoModel.load_pretrained(config.octo_path)
-    tasks = model.create_tasks(texts=[config.task_desc])
 
     obs, info = env.reset()
     print(f"Recording R1Lite demos for {FLAGS.exp_name}")
