@@ -1,12 +1,44 @@
 import argparse
+import os
 import time
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import numpy as np
+import yaml
 from scipy.spatial.transform import Rotation
 
 from franka_env.spacemouse.spacemouse_expert import SpaceMouseExpert
 from r1lite_env.client import R1LiteClient
+
+
+def _default_config_yaml() -> Optional[str]:
+    env_path = os.environ.get("R1LITE_REACH_CONFIG")
+    if env_path:
+        return env_path
+    # 从 serl_robot_infra/r1lite_env 回到仓库根目录，再定位 reach_target 的默认配置文件。
+    candidate = (
+        Path(__file__).resolve().parents[2]
+        / "examples"
+        / "experiments"
+        / "r1lite_reach_target"
+        / "config.yaml"
+    )
+    return str(candidate) if candidate.exists() else None
+
+
+def _load_control_defaults(config_yaml: Optional[str]) -> Dict[str, float]:
+    if not config_yaml:
+        return {}
+    path = Path(config_yaml)
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        return {}
+    control = data.get("control", {})
+    return control if isinstance(control, dict) else {}
 
 
 def _estimate_idle_bias(expert: SpaceMouseExpert, duration_sec: float) -> np.ndarray:
@@ -142,12 +174,15 @@ def _build_dual_arm_payload(
 
 
 def run() -> None:
+    default_config_yaml = _default_config_yaml()
+    control_defaults = _load_control_defaults(default_config_yaml)
     parser = argparse.ArgumentParser(description="Control R1Lite via SpaceMouse teleop owner")
+    parser.add_argument("--config-yaml", default=default_config_yaml, help="Optional YAML config file to load control.hz / xyz_scale / rot_scale defaults")
     parser.add_argument("--server-url", default="http://127.0.0.1:8001/")
     parser.add_argument("--arm", default="right", choices=["left", "right", "dual"])
-    parser.add_argument("--hz", type=float, default=10.0)
-    parser.add_argument("--xyz-scale", type=float, default=0.03)
-    parser.add_argument("--rot-scale", type=float, default=0.20)
+    parser.add_argument("--hz", type=float, default=float(control_defaults.get("hz", 10.0)))
+    parser.add_argument("--xyz-scale", type=float, default=float(control_defaults.get("xyz_scale", 0.03)))
+    parser.add_argument("--rot-scale", type=float, default=float(control_defaults.get("rot_scale", 0.20)))
     parser.add_argument("--preset", default="free_space")
     parser.add_argument("--mode", default=None, help="Defaults to the current service active_mode")
     parser.add_argument("--calibrate-seconds", type=float, default=0.5, help="Keep the SpaceMouse still at startup to estimate zero bias")
@@ -164,6 +199,12 @@ def run() -> None:
         default=2.0,
         help="Maximum debug print frequency for target-pose comparison.",
     )
+    parser.add_argument(
+        "--debug-effective-hz",
+        action="store_true",
+        default=bool(control_defaults.get("debug_effective_hz", False)),
+        help="Print the effective command loop frequency once per second.",
+    )
     args = parser.parse_args()
 
     client = R1LiteClient(args.server_url)
@@ -177,9 +218,15 @@ def run() -> None:
         f"trans={args.trans_deadzone:.3f}, rot={args.rot_deadzone:.3f}, "
         f"xyz_scale={args.xyz_scale:.3f}, rot_scale={args.rot_scale:.3f}"
     )
+    print(
+        f"[teleop] control config: config_yaml={args.config_yaml}, hz={args.hz:.2f}, "
+        f"debug_effective_hz={bool(args.debug_effective_hz)}"
+    )
     seq = 0
     last_log_time = 0.0
     last_debug_time = 0.0
+    hz_counter = 0
+    hz_log_start_time = time.time()
     step_dt = 1.0 / max(args.hz, 1e-6)
 
     try:
@@ -245,6 +292,14 @@ def run() -> None:
                 )
 
             response = client.post_action(payload)
+            if args.debug_effective_hz:
+                hz_counter += 1
+                now = time.time()
+                dt = now - hz_log_start_time
+                if dt >= 1.0:
+                    print(f"[teleop-loop] effective_control_hz={hz_counter / max(dt, 1e-6):.2f}")
+                    hz_counter = 0
+                    hz_log_start_time = now
             if time.time() - last_log_time > 1.0:
                 print(
                     f"seq={seq} owner={response.get('owner')} teleop_source={response.get('teleop_source')} "

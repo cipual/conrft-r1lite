@@ -8,9 +8,12 @@ env:
   random_rz_range: 0.15
   # reset 命令发出后先给机器人一个最小缓冲时间，再进入“到位 + 稳定”轮询。
   reset_settle_sec: 0.5
-  reset_wait_timeout_sec: 6.0
+  reset_wait_timeout_sec: 15.0
+  # 超时后默认直接报错，而不是带着未完成的 reset 继续下一条 episode。
+  reset_fail_on_timeout: true
   reset_poll_sec: 0.1
   reset_stable_count: 4
+  reset_debug: false
   reset_position_tolerance_m: 0.03
   reset_orientation_tolerance_rad: 0.35
   reset_joint_tolerance_rad: 0.08
@@ -24,10 +27,17 @@ env:
   reset_left_joint: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   abs_pose_limit_low:
     left: [0.22, -0.42, 0.18, 0.0, -1.2, -1.2]
-    right: [-0.10, -0.85, 0.27, 0.0, 0.0, -1.2]
+    right: [-0.10, -0.85, 0.27, -3.141592653589793, -3.141592653589793, -3.141592653589793]
   abs_pose_limit_high:
     left: [0.55, -0.05, 0.45, 3.141592653589793, 1.2, 1.2]
-    right: [0.60, -0.19, 0.70, 3.141592653589793, 1.4, 1.2]
+    right: [0.60, -0.19, 0.70, 3.141592653589793, 3.141592653589793, 3.141592653589793]
+
+control:
+  # 统一 standalone teleop 和 record-demo env 的控制尺度，尽量让两条链路手感一致。
+  hz: 10.0
+  xyz_scale: 0.03
+  rot_scale: 0.20
+  debug_effective_hz: true
 
 train:
   arm: "right"
@@ -36,6 +46,32 @@ train:
   setup_mode: "single-arm-fixed-gripper"
   task_desc: "Move the R1Lite end effector to the target pose"
   octo_path: "hf://rail-berkeley/octo-small-1.5"
+
+offline_training:
+  # 这些参数会直接影响 pretrain / learner 显存占用。
+  batch_size: 256
+  replay_buffer_capacity: 200000
+  cta_ratio: 2
+  discount: 0.98
+  checkpoint_period: 2000
+  buffer_period: 1000
+  checkpoint_path: "./conrft"
+  # 留空时由 shell 环境变量 DEMO_PATH 覆盖；如果两者都没给，会落回这个占位路径。
+  demo_path: "./demo_data/replace_me.pkl"
+  pretrain_steps: 20000
+  debug: false
+  pretrain:
+    q_weight: 0.1
+    bc_weight: 1.0
+    xla_mem_fraction: 0.85
+  learner:
+    q_weight: 1.0
+    bc_weight: 0.1
+    xla_mem_fraction: 0.5
+
+online_training:
+  actor:
+    xla_mem_fraction: 0.2
 
 task:
   target_left_pose: [0.43, -0.20, 0.28, 0.0, 1.0, 0.0, 0.0]

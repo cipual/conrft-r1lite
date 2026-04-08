@@ -65,12 +65,19 @@ Key values to confirm:
 - `train.setup_mode`
 - `TrainConfig.task_desc`
 - `TrainConfig.octo_path`
+- `offline_training.batch_size`
+- `offline_training.pretrain_steps`
+- `offline_training.pretrain.q_weight` / `offline_training.pretrain.bc_weight`
+- `offline_training.learner.q_weight` / `offline_training.learner.bc_weight`
+- `offline_training.pretrain.xla_mem_fraction`
 - `task.target_left_pose` / `task.target_right_pose`
 - `task.position_tolerance_m` / `task.orientation_tolerance_rad`
 - `task.success_reward` and dense reward weights
 - `teleop.calibrate_seconds`, `teleop.trans_deadzone`, `teleop.rot_deadzone`
 - `teleop.activate_threshold` / `teleop.release_threshold`
 - `gripper.fixed_open` / `gripper.open_value`
+- `control.hz` / `control.xyz_scale` / `control.rot_scale`
+- `control.debug_effective_hz`
 
 Default control mode is `ee_pose_servo`, which is the recommended mode for the
 first end-to-end run because SpaceMouse commands are expressed as end-effector
@@ -112,6 +119,7 @@ export R1LITE_REACH_CONFIG=/path/to/your/config.yaml
 Before recording demos, verify direct teleoperation:
 
 ```bash
+export R1LITE_REACH_CONFIG=/home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_reach_target/config.yaml
 cd serl_robot_infra
 python -m r1lite_env.spacemouse_teleop --server-url "$ROBOT" --arm right
 ```
@@ -181,9 +189,14 @@ policy before online exploration.
 
 Default script behavior:
 
-- `q_weight=0.1`
-- `bc_weight=1.0`
-- `pretrain_steps=20000`
+- defaults now come from `offline_training` in
+  [config.yaml](../examples/experiments/r1lite_reach_target/config.yaml)
+- commonly tuned fields are:
+  - `offline_training.batch_size`
+  - `offline_training.pretrain_steps`
+  - `offline_training.pretrain.q_weight`
+  - `offline_training.pretrain.bc_weight`
+  - `offline_training.pretrain.xla_mem_fraction`
 
 ## 6. Stage II: HIL-ConRFT Online Training
 

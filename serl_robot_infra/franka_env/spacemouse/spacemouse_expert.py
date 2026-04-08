@@ -48,8 +48,12 @@ class SpaceMouseExpert:
                 # print(buttons)
 
             # Update the shared state
-            self.latest_data["action"] = action
-            self.latest_data["buttons"] = buttons
+            try:
+                self.latest_data["action"] = action
+                self.latest_data["buttons"] = buttons
+            except (BrokenPipeError, ConnectionResetError, EOFError, OSError):
+                # 父进程已退出或 manager 已关闭，子进程静默结束即可。
+                break
 
     def get_action(self) -> Tuple[np.ndarray, list]:
         """Returns the latest action and button state of the SpaceMouse."""
@@ -58,5 +62,15 @@ class SpaceMouseExpert:
         return np.array(action), buttons
     
     def close(self):
-        # pyspacemouse.close()
-        self.process.terminate()
+        # 退出时先停后台读取进程，再关闭 manager，避免主进程结束后子进程仍写共享字典。
+        if hasattr(self, "process") and self.process is not None:
+            if self.process.is_alive():
+                self.process.terminate()
+                self.process.join(timeout=1.0)
+            self.process = None
+        if hasattr(self, "manager") and self.manager is not None:
+            try:
+                self.manager.shutdown()
+            except Exception:
+                pass
+            self.manager = None

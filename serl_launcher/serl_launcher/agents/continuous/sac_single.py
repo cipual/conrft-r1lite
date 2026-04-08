@@ -312,7 +312,7 @@ class SACAgentSingleArm(flax.struct.PyTreeNode):
 
         return self.replace(state=new_state), info
 
-    @partial(jax.jit, static_argnames=("argmax"))
+    @partial(jax.jit, static_argnames=("argmax",))
     def sample_actions(
         self,
         observations: Data,

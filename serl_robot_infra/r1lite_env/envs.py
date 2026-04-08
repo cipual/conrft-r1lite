@@ -1,8 +1,10 @@
 import copy
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, Optional
 
+import cv2
 import gymnasium as gym
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -14,6 +16,8 @@ from r1lite_env.client import R1LiteClient, decode_image_base64
 class R1LiteEnvConfig:
     SERVER_URL: str = "http://127.0.0.1:8001/"
     ACTION_SCALE: np.ndarray = field(default_factory=lambda: np.array([0.03, 0.20, 1.0], dtype=np.float32))
+    CONTROL_HZ: float = 10.0
+    LOG_EFFECTIVE_HZ: bool = False
     DISPLAY_IMAGE: bool = False
     MAX_EPISODE_LENGTH: int = 100
     DEFAULT_MODE: str = "ee_pose_servo"
@@ -30,8 +34,11 @@ class R1LiteEnvConfig:
     # 避免下一步继续沿用 reset 前的目标点。
     RESET_SETTLE_SEC: float = 1.5
     RESET_WAIT_TIMEOUT_SEC: float = 6.0
+    # reset 超时后默认直接报错停住，避免未完成 reset 就进入下一条 episode。
+    RESET_FAIL_ON_TIMEOUT: bool = True
     RESET_POLL_SEC: float = 0.1
     RESET_STABLE_COUNT: int = 4
+    RESET_DEBUG: bool = False
     RESET_POSITION_TOLERANCE_M: float = 0.03
     RESET_ORIENTATION_TOLERANCE_RAD: float = 0.35
     RESET_JOINT_TOLERANCE_RAD: float = 0.08
@@ -50,6 +57,13 @@ class R1LiteEnvConfig:
             "right": [np.inf, np.inf, np.inf, np.inf, np.inf, np.inf],
         }
     )
+    IMAGE_RESOLUTION: Dict[str, tuple] = field(
+        default_factory=lambda: {
+            "head": (256, 256),
+            "left_wrist": (128, 128),
+            "right_wrist": (128, 128),
+        }
+    )
     IMAGE_KEYS: tuple = ("head", "left_wrist", "right_wrist")
     ARM_IMAGE_KEYS: Dict[str, tuple] = field(default_factory=lambda: {"left": ("head", "left_wrist"), "right": ("head", "right_wrist")})
     # 参考 Franka 的 fixed-gripper 语义：任务不需要夹爪时，reset 后固定打开，
@@ -62,23 +76,40 @@ class _BaseR1LiteEnv(gym.Env):
     def __init__(self, config: Optional[R1LiteEnvConfig] = None, hz: int = 10, client: Optional[R1LiteClient] = None):
         self.config = config or R1LiteEnvConfig()
         self.client = client or R1LiteClient(self.config.SERVER_URL)
-        self.hz = hz
+        self.hz = float(getattr(self.config, "CONTROL_HZ", hz))
         self.max_episode_length = self.config.MAX_EPISODE_LENGTH
         self.curr_path_length = 0
         self.last_obs = None
         self.random_reset = bool(self.config.RANDOM_RESET)
         self.random_xy_range = float(self.config.RANDOM_XY_RANGE)
         self.random_rz_range = float(self.config.RANDOM_RZ_RANGE)
+        self._hz_counter = 0
+        self._hz_log_start_time = time.time()
 
     def _step_sleep(self, start_time: float):
         time.sleep(max(0.0, (1.0 / self.hz) - (time.time() - start_time)))
+
+    def _maybe_log_effective_hz(self, tag: str):
+        if not bool(getattr(self.config, "LOG_EFFECTIVE_HZ", False)):
+            return
+        self._hz_counter += 1
+        now = time.time()
+        dt = now - self._hz_log_start_time
+        if dt >= 1.0:
+            hz = self._hz_counter / max(dt, 1e-6)
+            print(f"[{tag}] effective_control_hz={hz:.2f}")
+            self._hz_counter = 0
+            self._hz_log_start_time = now
 
     def _decode_images(self, image_dict: Dict[str, Optional[str]], keys) -> Dict[str, np.ndarray]:
         decoded = {}
         for key in keys:
             image = decode_image_base64(image_dict.get(key))
+            target_hw = self.config.IMAGE_RESOLUTION.get(key, (256, 256))
             if image is None:
-                image = np.zeros((256, 256, 3), dtype=np.uint8)
+                image = np.zeros((target_hw[0], target_hw[1], 3), dtype=np.uint8)
+            elif image.shape[:2] != tuple(target_hw):
+                image = cv2.resize(image, (int(target_hw[1]), int(target_hw[0])), interpolation=cv2.INTER_AREA)
             decoded[key] = image
         return decoded
 
@@ -159,14 +190,28 @@ class _BaseR1LiteEnv(gym.Env):
         prev_joint = None
         stable_count = 0
         latest_raw = None
+        poll_index = 0
+
+        if bool(self.config.RESET_DEBUG):
+            target_kind = "pose" if target_pose is not None else "joint"
+            print(
+                f"[reset-debug:{arm}] waiting for reset completion "
+                f"(target={target_kind}, settle={self.config.RESET_SETTLE_SEC:.2f}s, "
+                f"timeout={self.config.RESET_WAIT_TIMEOUT_SEC:.2f}s, "
+                f"stable_count_required={self.config.RESET_STABLE_COUNT})"
+            )
 
         while time.time() < deadline:
+            poll_index += 1
             latest_raw = self.client.get_state()
             arm_state = latest_raw["state"][arm]
             current_pose = np.asarray(arm_state["tcp_pose"], dtype=np.float32)
             current_joint = np.asarray(arm_state["joint_pos"], dtype=np.float32)
 
             reached = True
+            pos_error = None
+            ori_error = None
+            joint_error = None
             if target_pose is not None:
                 pos_error = float(np.linalg.norm(current_pose[:3] - target_pose[:3]))
                 ori_error = self._quat_angle_error_rad(current_pose[3:], target_pose[3:])
@@ -179,6 +224,9 @@ class _BaseR1LiteEnv(gym.Env):
                 reached = joint_error <= float(self.config.RESET_JOINT_TOLERANCE_RAD)
 
             stable = False
+            pos_delta = None
+            ori_delta = None
+            joint_delta = None
             if prev_pose is not None and prev_joint is not None:
                 pos_delta = float(np.linalg.norm(current_pose[:3] - prev_pose[:3]))
                 ori_delta = self._quat_angle_error_rad(current_pose[3:], prev_pose[3:])
@@ -190,15 +238,46 @@ class _BaseR1LiteEnv(gym.Env):
                 )
 
             stable_count = stable_count + 1 if (reached and stable) else 0
+
+            if bool(self.config.RESET_DEBUG):
+                if target_pose is not None:
+                    print(
+                        f"[reset-debug:{arm}] poll={poll_index} "
+                        f"reached={reached} stable={stable} stable_count={stable_count}/{self.config.RESET_STABLE_COUNT} "
+                        f"pos_error={pos_error:.4f} ori_error={ori_error:.4f} "
+                        f"pos_delta={0.0 if pos_delta is None else pos_delta:.4f} "
+                        f"ori_delta={0.0 if ori_delta is None else ori_delta:.4f}"
+                    )
+                else:
+                    print(
+                        f"[reset-debug:{arm}] poll={poll_index} "
+                        f"reached={reached} stable={stable} stable_count={stable_count}/{self.config.RESET_STABLE_COUNT} "
+                        f"joint_error={joint_error:.4f} "
+                        f"joint_delta={0.0 if joint_delta is None else joint_delta:.4f}"
+                    )
             prev_pose = current_pose.copy()
             prev_joint = current_joint.copy()
 
             if stable_count >= int(self.config.RESET_STABLE_COUNT):
+                if bool(self.config.RESET_DEBUG):
+                    print(f"[reset-debug:{arm}] reset accepted after {poll_index} polls")
                 return latest_raw
 
             time.sleep(max(0.0, float(self.config.RESET_POLL_SEC)))
 
-        # 超时后仍返回最后一次状态，避免 reset 直接卡死。
+        if bool(self.config.RESET_DEBUG):
+            print(f"[reset-debug:{arm}] reset wait timed out after {poll_index} polls")
+        if bool(self.config.RESET_FAIL_ON_TIMEOUT):
+            if target_pose is not None:
+                raise TimeoutError(
+                    f"{arm} reset timed out: pose reset did not become reached+stable within "
+                    f"{self.config.RESET_WAIT_TIMEOUT_SEC:.2f}s"
+                )
+            raise TimeoutError(
+                f"{arm} reset timed out: joint reset did not become reached+stable within "
+                f"{self.config.RESET_WAIT_TIMEOUT_SEC:.2f}s"
+            )
+        # 仅在显式关闭 fail-on-timeout 时才回退到旧行为。
         return latest_raw if latest_raw is not None else self.client.get_state()
 
 
@@ -225,7 +304,16 @@ class R1LiteArmEnv(_BaseR1LiteEnv):
                 ),
                 "images": gym.spaces.Dict(
                     {
-                        key: gym.spaces.Box(0, 255, shape=(256, 256, 3), dtype=np.uint8)
+                        key: gym.spaces.Box(
+                            0,
+                            255,
+                            shape=(
+                                int(self.config.IMAGE_RESOLUTION[key][0]),
+                                int(self.config.IMAGE_RESOLUTION[key][1]),
+                                3,
+                            ),
+                            dtype=np.uint8,
+                        )
                         for key in self.config.ARM_IMAGE_KEYS[self.arm]
                     }
                 ),
@@ -281,7 +369,12 @@ class R1LiteArmEnv(_BaseR1LiteEnv):
         action = np.clip(np.asarray(action, dtype=np.float32), self.action_space.low, self.action_space.high)
         raw = self.client.get_state()
         tcp_pose = np.asarray(raw["state"][self.arm]["tcp_pose"], dtype=np.float32)
-        reference_pose = self.commanded_pose.copy() if self.commanded_pose is not None else tcp_pose.copy()
+        # 对齐独立 teleop 的手感：有明确人工输入时，用当前观测 tcp_pose 做参考；
+        # 只有零输入保持时，才继续沿用 commanded_pose 来 hold 住目标。
+        if float(np.linalg.norm(action[:6])) > 1e-6:
+            reference_pose = tcp_pose.copy()
+        else:
+            reference_pose = self.commanded_pose.copy() if self.commanded_pose is not None else tcp_pose.copy()
         pose_target = self._clip_pose_to_safety_box(self.arm, self._target_pose_from_action(reference_pose, action[:6]))
         side_payload = {
             "pose_target": pose_target.tolist(),
@@ -297,6 +390,7 @@ class R1LiteArmEnv(_BaseR1LiteEnv):
         self.client.post_action(payload)
         self.commanded_pose = pose_target.copy()
         self._step_sleep(start_time)
+        self._maybe_log_effective_hz(f"env-step:{self.arm}")
         next_raw = self.client.get_state()
         obs = self._extract_obs(next_raw)
         self.curr_path_length += 1
@@ -343,7 +437,16 @@ class DualR1LiteEnv(_BaseR1LiteEnv):
                 ),
                 "images": gym.spaces.Dict(
                     {
-                        key: gym.spaces.Box(0, 255, shape=(256, 256, 3), dtype=np.uint8)
+                        key: gym.spaces.Box(
+                            0,
+                            255,
+                            shape=(
+                                int(self.config.IMAGE_RESOLUTION[key][0]),
+                                int(self.config.IMAGE_RESOLUTION[key][1]),
+                                3,
+                            ),
+                            dtype=np.uint8,
+                        )
                         for key in self.config.IMAGE_KEYS
                     }
                 ),

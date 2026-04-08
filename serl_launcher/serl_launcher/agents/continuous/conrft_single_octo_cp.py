@@ -725,6 +725,7 @@ class ConrftCPOctoAgentSingleArm(flax.struct.PyTreeNode):
             encoder=octo_model.module.octo_transformer,
             use_proprio=use_proprio,
             enable_stacking=True,
+            image_keys=image_keys,
         )
 
         encoders = {

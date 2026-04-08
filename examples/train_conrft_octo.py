@@ -2,6 +2,7 @@
 
 import glob
 import time
+import cv2
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -70,6 +71,39 @@ sharding = jax.sharding.PositionalSharding(devices)
 
 def print_green(x):
     return print("\033[92m {}\033[00m".format(x))
+
+
+def _resize_transition_images_to_env(transition, observation_space, image_keys):
+    if "observations" not in transition or "next_observations" not in transition:
+        return transition
+
+    def _resize_obs_images(obs_dict):
+        if not isinstance(obs_dict, dict):
+            return obs_dict
+        updated = copy.deepcopy(obs_dict)
+        for image_key in image_keys:
+            if image_key not in updated:
+                continue
+            target_shape = observation_space[image_key].shape
+            target_hw = tuple(target_shape[-3:-1])
+            images = np.asarray(updated[image_key])
+            if images.shape[-3:-1] == target_hw:
+                continue
+            if images.ndim != 4:
+                raise ValueError(
+                    f"Expected stacked images for '{image_key}' with shape (T, H, W, C), got {images.shape}"
+                )
+            resized = [
+                cv2.resize(frame, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_AREA)
+                for frame in images
+            ]
+            updated[image_key] = np.stack(resized, axis=0).astype(np.uint8)
+        return updated
+
+    transition = copy.deepcopy(transition)
+    transition["observations"] = _resize_obs_images(transition["observations"])
+    transition["next_observations"] = _resize_obs_images(transition["next_observations"])
+    return transition
 
 
 ##############################################################################
@@ -569,6 +603,11 @@ def main(_):
             with open(path, "rb") as f:
                 transitions = pkl.load(f)
                 for transition in transitions:
+                    transition = _resize_transition_images_to_env(
+                        transition,
+                        env.observation_space,
+                        config.image_keys,
+                    )
                     if 'infos' in transition and 'grasp_penalty' in transition['infos']:
                         transition['grasp_penalty'] = transition['infos']['grasp_penalty']
                     demo_buffer.insert(transition)

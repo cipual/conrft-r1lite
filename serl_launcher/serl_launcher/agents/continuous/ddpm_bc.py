@@ -94,7 +94,8 @@ class DDPMBCAgent(flax.struct.PyTreeNode):
 
         return self.replace(state=new_state), info
 
-    @partial(jax.jit, static_argnames="argmax")
+    # 这里没有 argmax 参数；新版本 JAX 会对无效 static_argnames 直接报错。
+    @jax.jit
     def sample_actions(
         self,
         observations: np.ndarray,

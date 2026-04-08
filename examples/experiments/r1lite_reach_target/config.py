@@ -44,10 +44,44 @@ def _cfg(path: str, default):
     return current
 
 
+def _runtime_defaults() -> dict:
+    """集中返回脚本运行时默认值，供 bash 启动脚本和 Python 侧共用。"""
+    return {
+        "checkpoint_path": _cfg("offline_training.checkpoint_path", "./conrft"),
+        "demo_path": _cfg("offline_training.demo_path", "./demo_data/replace_me.pkl"),
+        "pretrain_steps": int(_cfg("offline_training.pretrain_steps", 20000)),
+        "pretrain_q_weight": float(_cfg("offline_training.pretrain.q_weight", 0.1)),
+        "pretrain_bc_weight": float(_cfg("offline_training.pretrain.bc_weight", 1.0)),
+        "learner_q_weight": float(_cfg("offline_training.learner.q_weight", 1.0)),
+        "learner_bc_weight": float(_cfg("offline_training.learner.bc_weight", 0.1)),
+        "debug": bool(_cfg("offline_training.debug", False)),
+        "xla_mem_fraction_pretrain": float(_cfg("offline_training.pretrain.xla_mem_fraction", 0.85)),
+        "xla_mem_fraction_learner": float(_cfg("offline_training.learner.xla_mem_fraction", 0.5)),
+        "xla_mem_fraction_actor": float(_cfg("online_training.actor.xla_mem_fraction", 0.2)),
+    }
+
+
+def get_runtime_default(key: str, default=None):
+    """给 shell 启动脚本读取 YAML 默认值用，避免在多个脚本里写死。"""
+    return _runtime_defaults().get(key, default)
+
+
 @dataclass
 class EnvConfig(R1LiteEnvConfig):
     # 优先从环境变量 ROBOT 读取机器人服务地址，便于在不同机器之间切换。
     SERVER_URL: str = os.environ.get("ROBOT", _cfg("env.server_url", "http://127.0.0.1:8001/"))
+    ACTION_SCALE: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [
+                float(_cfg("control.xyz_scale", 0.03)),
+                float(_cfg("control.rot_scale", 0.20)),
+                1.0,
+            ],
+            dtype=np.float32,
+        )
+    )
+    CONTROL_HZ: float = float(_cfg("control.hz", 10.0))
+    LOG_EFFECTIVE_HZ: bool = bool(_cfg("control.debug_effective_hz", False))
     MAX_EPISODE_LENGTH: int = int(_cfg("env.max_episode_length", 80))
     DEFAULT_MODE: str = _cfg("env.default_mode", "ee_pose_servo")
     DEFAULT_PRESET: str = _cfg("env.default_preset", "free_space")
@@ -56,8 +90,10 @@ class EnvConfig(R1LiteEnvConfig):
     RANDOM_RZ_RANGE: float = float(_cfg("env.random_rz_range", 0.15))
     RESET_SETTLE_SEC: float = float(_cfg("env.reset_settle_sec", 1.5))
     RESET_WAIT_TIMEOUT_SEC: float = float(_cfg("env.reset_wait_timeout_sec", 6.0))
+    RESET_FAIL_ON_TIMEOUT: bool = bool(_cfg("env.reset_fail_on_timeout", True))
     RESET_POLL_SEC: float = float(_cfg("env.reset_poll_sec", 0.1))
     RESET_STABLE_COUNT: int = int(_cfg("env.reset_stable_count", 4))
+    RESET_DEBUG: bool = bool(_cfg("env.reset_debug", False))
     RESET_POSITION_TOLERANCE_M: float = float(_cfg("env.reset_position_tolerance_m", 0.03))
     RESET_ORIENTATION_TOLERANCE_RAD: float = float(_cfg("env.reset_orientation_tolerance_rad", 0.35))
     RESET_JOINT_TOLERANCE_RAD: float = float(_cfg("env.reset_joint_tolerance_rad", 0.08))
@@ -89,11 +125,14 @@ class TrainConfig(DefaultTrainingConfig):
     arm = _cfg("train.arm", "right")
     image_keys = list(_cfg("train.image_keys", ["image_primary", "image_wrist"])) # 头部相机 + 腕部相机
     proprio_keys = ["tcp_pose", "tcp_vel", "tcp_force", "tcp_torque", "gripper_pose"]
-    checkpoint_period = 2000
-    cta_ratio = 2
+    # 这些参数会直接影响离线/在线训练显存和吞吐，统一挪到 YAML 方便按机器调。
+    batch_size = int(_cfg("offline_training.batch_size", 256))
+    replay_buffer_capacity = int(_cfg("offline_training.replay_buffer_capacity", 200000))
+    checkpoint_period = int(_cfg("offline_training.checkpoint_period", 2000))
+    cta_ratio = int(_cfg("offline_training.cta_ratio", 2))
     random_steps = 0
-    discount = 0.98
-    buffer_period = 1000
+    discount = float(_cfg("offline_training.discount", 0.98))
+    buffer_period = int(_cfg("offline_training.buffer_period", 1000))
     encoder_type = "resnet-pretrained"
     # 参考 Franka reach / pregrasp 场景：当前任务不学习夹爪，策略只关心 6DoF 末端动作。
     setup_mode = _cfg("train.setup_mode", "single-arm-fixed-gripper")

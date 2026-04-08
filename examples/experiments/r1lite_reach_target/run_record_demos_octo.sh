@@ -1,7 +1,7 @@
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
 
-SUCCESS_COUNT=${SUCCESS_COUNT:-20}
+SUCCESS_COUNT=${SUCCESS_COUNT:-1}
 OUTPUT_DIR=${OUTPUT_DIR:-./demo_data}
 # 直接从实验目录执行时，也能找到本地 serl_robot_infra / serl_launcher 包。
 export PYTHONPATH="${REPO_ROOT}/serl_robot_infra:${REPO_ROOT}/serl_launcher:${PYTHONPATH}"
