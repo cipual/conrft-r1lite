@@ -73,6 +73,15 @@ def print_green(x):
     return print("\033[92m {}\033[00m".format(x))
 
 
+def _normalize_runtime_paths():
+    """统一把运行时路径转成绝对路径，兼容 orbax 对 checkpoint 的要求。"""
+    if FLAGS.checkpoint_path:
+        FLAGS.checkpoint_path = os.path.abspath(FLAGS.checkpoint_path)
+
+    if FLAGS.demo_path:
+        FLAGS.demo_path = [os.path.abspath(path) for path in FLAGS.demo_path]
+
+
 def _resize_transition_images_to_env(transition, observation_space, image_keys):
     if "observations" not in transition or "next_observations" not in transition:
         return transition
@@ -313,12 +322,12 @@ def learner(rng, tasks, agent, replay_buffer, demo_buffer, wandb_logger=None):
     """
     The learner loop, which runs when "--learner" is set to True.
     """
-    start_step = (
-        int(os.path.basename(checkpoints.latest_checkpoint(
-            FLAGS.checkpoint_path))[11:]) + 1
+    latest_ckpt = (
+        checkpoints.latest_checkpoint(FLAGS.checkpoint_path)
         if FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path)
-        else 0
+        else None
     )
+    start_step = int(os.path.basename(latest_ckpt)[11:]) + 1 if latest_ckpt else 0
     step = start_step
     online_start_step = start_step
 
@@ -486,6 +495,7 @@ def learner(rng, tasks, agent, replay_buffer, demo_buffer, wandb_logger=None):
 
 def main(_):
     global config
+    _normalize_runtime_paths()
     config = CONFIG_MAPPING[FLAGS.exp_name]()
 
     assert config.batch_size % num_devices == 0
@@ -547,22 +557,30 @@ def main(_):
         jnp.array, agent), sharding.replicate())
 
     if FLAGS.checkpoint_path is not None and os.path.exists(FLAGS.checkpoint_path):
-        if not FLAGS.learner:
-            input("Checkpoint path already exists. Press Enter to resume training.")
-        ckpt = checkpoints.restore_checkpoint(
-            FLAGS.checkpoint_path, agent.state,)
-        # agent = agent.replace(state=ckpt)
+        latest_ckpt = checkpoints.latest_checkpoint(FLAGS.checkpoint_path)
+        # orbax 失败时可能只留下 *.orbax-checkpoint-tmp-* 临时目录，
+        # 这时 latest_checkpoint 会返回 None，不能按“可恢复 checkpoint”处理。
+        if latest_ckpt is None:
+            print_green(
+                f"No completed checkpoint found under {FLAGS.checkpoint_path}. "
+                "Skipping checkpoint restore."
+            )
+        else:
+            if not FLAGS.learner:
+                input("Checkpoint path already exists. Press Enter to resume training.")
+            ckpt = checkpoints.restore_checkpoint(
+                FLAGS.checkpoint_path, agent.state,)
+            # agent = agent.replace(state=ckpt)
 
-        # Update params only, ignore the optimizer states
-        new_params = ckpt.params
-        new_target_params = ckpt.target_params
+            # Update params only, ignore the optimizer states
+            new_params = ckpt.params
+            new_target_params = ckpt.target_params
 
-        agent = agent.replace(state=agent.state.replace(
-            params=new_params, target_params=new_target_params))
+            agent = agent.replace(state=agent.state.replace(
+                params=new_params, target_params=new_target_params))
 
-        ckpt_number = os.path.basename(
-            checkpoints.latest_checkpoint(FLAGS.checkpoint_path))[11:]
-        print_green(f"Loaded previous checkpoint at step {ckpt_number}.")
+            ckpt_number = os.path.basename(latest_ckpt)[11:]
+            print_green(f"Loaded previous checkpoint at step {ckpt_number}.")
 
     def create_replay_buffer_and_wandb_logger():
         replay_buffer = MemoryEfficientReplayBufferDataStore(

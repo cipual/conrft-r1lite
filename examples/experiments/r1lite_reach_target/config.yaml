@@ -57,7 +57,7 @@ offline_training:
   buffer_period: 1000
   checkpoint_path: "./conrft"
   # 留空时由 shell 环境变量 DEMO_PATH 覆盖；如果两者都没给，会落回这个占位路径。
-  demo_path: "./demo_data/replace_me.pkl"
+  demo_path: "./demo_data/r1lite_reach_target_10_demos_2026-04-08_14-37-54.pkl"
   pretrain_steps: 20000
   debug: false
   pretrain:

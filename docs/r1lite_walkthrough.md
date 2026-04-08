@@ -198,6 +198,101 @@ Default script behavior:
   - `offline_training.pretrain.bc_weight`
   - `offline_training.pretrain.xla_mem_fraction`
 
+### W&B Curves During Offline Pretrain
+
+The offline learner logs `update_info` from
+[conrft_single_octo_cp.py](../serl_launcher/serl_launcher/agents/continuous/conrft_single_octo_cp.py)
+to W&B. The most important curves are:
+
+- `actor_loss`
+  The total policy loss used to update the actor. It is the weighted sum of
+  behavior cloning loss and Q-guidance loss:
+  `actor_loss = bc_weight * bc_loss + q_weight * (-q_loss)`.
+  This is a mixed objective, so its absolute value is less important than its
+  long-term trend and stability.
+
+- `bc_loss`
+  The behavior cloning / consistency loss. This tells you how well the policy
+  matches demo actions. In offline pretrain this is usually one of the most
+  important curves. A gradual decrease is generally a good sign.
+
+- `mse`
+  Mean squared error between predicted actions and demo actions. This is the
+  easiest “is the policy imitating the demos” indicator to read. It should
+  usually decrease during successful offline warm-up.
+
+- `q_loss`
+  Logged as the mean Q value of the current policy actions. Because the actor
+  objective uses `-Q`, a larger `q_loss` here usually means the critic thinks
+  the actor’s actions are better. Read it together with `bc_loss`, not alone.
+
+- `q_weight`
+  The current weight of the Q-guidance term in actor training.
+
+- `bc_weight`
+  The current weight of the behavior cloning term in actor training.
+
+- `critic_loss`
+  Total critic loss. In Cal-QL this includes both TD loss and CQL penalty:
+  `critic_loss = td_loss + cql_alpha * cql_loss`.
+  This curve can be noisy; watch for explosions or sustained divergence.
+
+- `td_loss`
+  Temporal-difference regression loss for the critic. This shows how well the
+  critic fits bootstrap targets from offline data.
+
+- `cql_loss`
+  Conservative Q-Learning penalty. It pushes the critic to avoid assigning
+  unrealistically high values to unsupported actions. This is expected to be
+  non-zero in offline training.
+
+- `cql_alpha`
+  Weight applied to the conservative penalty. In the current implementation it
+  is fixed by config, so this curve is mainly useful for confirming the run is
+  using the expected setting.
+
+- `cql_diff`
+  The raw Q-gap used before clipping in the CQL term. Large positive values
+  typically mean the critic is trying to score out-of-distribution actions too
+  highly; very unstable swings here often correlate with critic instability.
+
+- `calql_bound_rate`
+  Fraction of sampled Q values that fall below the Monte Carlo return lower
+  bound used by Cal-QL. This is a Cal-QL-specific diagnostic and is mainly for
+  relative comparison between runs, not for a strict target value.
+
+- `predicted_qs`
+  Mean Q predicted by the critic on the batch actions.
+
+- `target_qs`
+  Mean bootstrap target used to train the critic.
+
+- `rewards`
+  Mean batch reward from demo transitions. In pure offline pretrain on a fixed
+  dataset, this should usually stay roughly stationary. It is a dataset sanity
+  check, not a learning-progress metric.
+
+- `actor_lr`, `critic_lr`
+  Optimizer learning rates. These are useful mainly to confirm schedules or
+  debug unexpected training behavior.
+
+- `timer/*`
+  Average runtime breakdowns logged from the training loop. These help diagnose
+  slow data loading, replay sampling, or update steps, but they are not RL
+  quality metrics.
+
+How to read the curves quickly:
+
+- If `bc_loss` and `mse` go down while `critic_loss` stays bounded, offline
+  pretrain is usually behaving reasonably.
+- If `critic_loss`, `td_loss`, or `cql_diff` suddenly explode, the critic is
+  likely unstable; try smaller `offline_training.batch_size` first.
+- If `bc_loss` barely moves, inspect the demo quality, action scaling, and
+  whether the dataset matches the current observation schema.
+- If W&B shows `rewards` drifting a lot during pure offline pretrain, that is
+  often a sign of dataset mixing or loading problems rather than actual policy
+  improvement.
+
 ## 6. Stage II: HIL-ConRFT Online Training
 
 Run both threads:
