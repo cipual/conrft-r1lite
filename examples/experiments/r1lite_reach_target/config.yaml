@@ -37,7 +37,7 @@ control:
   hz: 10.0
   xyz_scale: 0.03
   rot_scale: 0.20
-  debug_effective_hz: true
+  debug_effective_hz: false
 
 train:
   arm: "right"

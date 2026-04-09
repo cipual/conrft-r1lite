@@ -26,6 +26,46 @@ The raw HTTP env response is adapted into:
 }
 ```
 
+### Current Field Sources In `R1LiteArmEnv`
+
+The single-arm env currently reads every observation field from the robot HTTP
+`/state` response through
+[envs.py](../serl_robot_infra/r1lite_env/envs.py).
+
+Field-by-field source mapping:
+
+| ConRFT field | Current source in `/state` | Notes |
+|---|---|---|
+| `state.tcp_pose` | `raw["state"][arm]["tcp_pose"]` | Real robot/server value |
+| `state.tcp_vel` | `raw["state"][arm]["tcp_vel"]` | Real robot/server value |
+| `state.tcp_force` | `raw["state"][arm]["tcp_force"]` | Present in schema, but only as reliable as the server-side source |
+| `state.tcp_torque` | `raw["state"][arm]["tcp_torque"]` | Present in schema, but only as reliable as the server-side source |
+| `state.gripper_pose` | `raw["state"][arm]["gripper_pose"]` | Real robot/server value |
+| `state.joint_pos` | `raw["state"][arm]["joint_pos"]` | Real robot/server value |
+| `state.joint_vel` | `raw["state"][arm]["joint_vel"]` | Real robot/server value |
+| `state.joint_effort` | `raw["state"][arm]["joint_effort"]` | Present in schema, but only as reliable as the server-side source |
+| `images.image_primary` | `raw["images"]["head"]` after env-side resize/remap | Mapped to `image_primary` by wrapper |
+| `images.image_wrist` | `raw["images"]["left_wrist" / "right_wrist"]` after env-side resize/remap | Mapped to `image_wrist` by wrapper |
+
+Important clarification:
+
+- the current env schema exposes `tcp_force`, `tcp_torque`, and `joint_effort`
+  because the training stack expects these keys to exist
+- however, whether these values are **real measured signals** depends entirely
+  on what the robot service is actually returning at `/state`
+- they should not be assumed to be trustworthy force/torque/effort signals
+  unless the upstream robot server path has been verified separately
+
+For the official teleop bag we inspected, the available bag topics do **not**
+currently provide usable TCP wrench samples:
+
+- `/hdas/feedback_right_arm_wrench` exists but has `message_count = 0`
+- `/hdas/feedback_left_arm_wrench` exists but has `message_count = 0`
+
+So for official-teleop conversion, `tcp_force` / `tcp_torque` should currently
+be treated as unavailable unless a different bag confirms non-empty wrench
+topics or another state source is added.
+
 For ConRFT, the default proprio subset is:
 
 ```python
@@ -38,7 +78,7 @@ After `SERLObsWrapper` and `ChunkingWrapper(obs_horizon=2)`, training consumes:
 {
     "state": float32[2, 20],
     "image_primary": uint8[2, 256, 256, 3],
-    "image_wrist": uint8[2, 256, 256, 3],
+    "image_wrist": uint8[2, 128, 128, 3],
 }
 ```
 
@@ -94,6 +134,20 @@ ConRFT learner still expects transition `.pkl` files instead of raw HDF5:
 
 The Octo embedding helper now uses the configured image keys instead of the
 Franka-specific `side_policy_256` and `wrist_1`.
+
+### Conversion Note
+
+When converting official teleop bags into RL transitions, do **not** resize
+images in the first conversion stage unless you are explicitly targeting a
+specific model input format.
+
+Recommended split:
+
+1. official teleop bag -> task-aligned RL transition data with original images
+2. RL transition data -> model-specific resized tensors (for example Octo)
+
+This keeps the conversion output model-agnostic and avoids throwing away image
+information too early.
 
 ## First task: reach target pose
 

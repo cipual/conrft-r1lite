@@ -174,6 +174,146 @@ What the script does:
 - writes a ConRFT-ready `.pkl` file to
   `examples/experiments/r1lite_reach_target/demo_data`
 
+Official teleop conversion path:
+
+- if you collect data with the Galaxea official teleop pipeline first, use the
+  official-teleop conversion script instead of `run_record_demos_octo.sh`
+- the current script reads the task config, inspects bag metadata, resolves the
+  required topics, and builds the target RL timeline from `control.hz`
+- the current implementation uses `rosbags` for stage-1 conversion and writes a
+  task-aligned transition `.pkl` with original image resolution
+- `--dry_run` is still useful for checking topic mapping before doing the full
+  conversion
+
+Example:
+
+```bash
+cd /home/robot/VLA-RL/conrft-r1lite/examples
+python convert_official_teleop_to_conrft_demo.py \
+    --exp_name=r1lite_reach_target \
+    --input_dir=/home/robot/VLA-RL/conrft-r1lite/20260409/RB251106041_20260409152555451_RAW \
+    --dry_run \
+    --output_file=/tmp/r1lite_official_teleop_plan.json
+```
+
+What this command currently does:
+
+- loads `examples/experiments/r1lite_reach_target/config.yaml`
+- checks that the required topics exist for the configured arm and `image_keys`
+- chooses the topic mapping for `image_primary`, `image_wrist`, proprioception,
+  and teleop targets
+- builds a uniform timeline using `control.hz`
+- writes a JSON plan to `--output_file`
+
+Once the conversion environment is installed, the full conversion command is:
+
+```bash
+cd /home/robot/VLA-RL/conrft-r1lite/examples
+python convert_official_teleop_to_conrft_demo.py \
+    --exp_name=r1lite_reach_target \
+    --input_dir=/home/robot/VLA-RL/conrft-r1lite/20260409/RB251106041_20260409152555451_RAW \
+    --output_file=/home/robot/VLA-RL/conrft-r1lite/20260409/r1lite_reach_target_official_teleop_stage1.pkl
+```
+
+What the full conversion currently produces:
+
+- `observations`
+- `actions`
+- `next_observations`
+- `rewards`
+- `masks`
+- `dones`
+- `mc_returns`
+
+Reward and done alignment:
+
+- the offline official-teleop conversion uses the same task semantics as the
+  online demo path in `record_demos_r1lite_octo.py`
+- for `r1lite_reach_target`, reward / success / done are recomputed from the
+  converted `tcp_pose` sequence using the same target pose and thresholds as
+  [wrapper.py](../examples/experiments/r1lite_reach_target/wrapper.py)
+- `mc_returns` are added with the same helper used by online demo recording
+
+If you want a final training `.pkl` with Octo embeddings in one command, add
+`--with_embeddings`:
+
+```bash
+cd /home/robot/VLA-RL/conrft-r1lite/examples
+python convert_official_teleop_to_conrft_demo.py \
+    --exp_name=r1lite_reach_target \
+    --input_dir=/home/robot/VLA-RL/conrft-r1lite/20260409/RB251106041_20260409152555451_RAW \
+    --output_file=/home/robot/VLA-RL/conrft-r1lite/20260409/r1lite_reach_target_official_teleop_final.pkl \
+    --with_embeddings
+```
+
+With `--with_embeddings`, the converted output also includes:
+
+- `embeddings`
+- `next_embeddings`
+
+The dry-run output is useful to verify:
+
+- which camera topics will map to `image_primary` and `image_wrist`
+- whether the task is treated as left-arm, right-arm, or dual-arm
+- which action reconstruction strategy will be used
+- how many RL steps the bag will produce after resampling
+
+For the current sample bag under `20260409`, the recommended dry-run command is:
+
+```bash
+cd /home/robot/VLA-RL/conrft-r1lite/examples
+python convert_official_teleop_to_conrft_demo.py \
+    --exp_name=r1lite_reach_target \
+    --input_dir=/home/robot/VLA-RL/conrft-r1lite/20260409/RB251106041_20260409152555451_RAW \
+    --dry_run \
+    --output_file=/tmp/official_teleop_plan.json
+```
+
+The full conversion design is documented in
+[official_teleop_to_conrft_conversion.md](./official_teleop_to_conrft_conversion.md).
+
+Replaying a saved transition trajectory:
+
+- if you want to replay one saved transition trajectory on the robot, use the
+  replay helper below
+- it resets before replay by default, replays one trajectory split by `done`,
+  and resets again after replay finishes
+
+First inspect how many trajectories are inside the `.pkl`:
+
+```bash
+cd /home/robot/VLA-RL/conrft-r1lite/examples
+python replay_transition_r1lite.py \
+    --exp_name=r1lite_reach_target \
+    --input_file=/home/robot/VLA-RL/conrft-r1lite/20260409/r1lite_reach_target_official_teleop_final.pkl \
+    --list_only
+```
+
+Then replay one trajectory, for example trajectory `0`:
+
+```bash
+cd /home/robot/VLA-RL/conrft-r1lite/examples
+python replay_transition_r1lite.py \
+    --exp_name=r1lite_reach_target \
+    --input_file=/home/robot/VLA-RL/conrft-r1lite/20260409/r1lite_reach_target_official_teleop_final.pkl \
+    --trajectory_index=0
+```
+
+Useful options:
+
+- `--no_reset_before`
+- `--no_reset_after`
+- `--reset_wait_sec=1.0`
+- `--log_every=10`
+
+During replay, the script prints the position/orientation error between:
+
+- the robot's actual current TCP pose
+- the saved `next_observations["state"][-1, :7]` TCP pose from the transition
+
+This makes it easier to judge how closely the replay follows the original
+recorded trajectory.
+
 ## 5. Stage I: Cal-ConRFT Pretrain
 
 Set `DEMO_PATH` to the demo file recorded in the previous step:
