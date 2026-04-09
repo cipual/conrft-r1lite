@@ -280,6 +280,11 @@ class _BaseR1LiteEnv(gym.Env):
         # 仅在显式关闭 fail-on-timeout 时才回退到旧行为。
         return latest_raw if latest_raw is not None else self.client.get_state()
 
+    def close(self):
+        if hasattr(self.client, "close"):
+            self.client.close()
+        return super().close()
+
 
 class R1LiteArmEnv(_BaseR1LiteEnv):
     def __init__(self, arm: str = "left", config: Optional[R1LiteEnvConfig] = None, hz: int = 10, client: Optional[R1LiteClient] = None):

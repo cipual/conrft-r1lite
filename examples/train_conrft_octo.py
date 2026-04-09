@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import glob
+import signal
 import time
 import cv2
 import jax
@@ -67,10 +68,38 @@ flags.DEFINE_boolean(
 devices = jax.local_devices()
 num_devices = len(devices)
 sharding = jax.sharding.PositionalSharding(devices)
+_SHUTDOWN_REQUESTED = False
 
 
 def print_green(x):
     return print("\033[92m {}\033[00m".format(x))
+
+
+def _request_shutdown(signum=None, _frame=None):
+    global _SHUTDOWN_REQUESTED
+    if not _SHUTDOWN_REQUESTED:
+        _SHUTDOWN_REQUESTED = True
+        print_green(f"Shutdown requested (signal={signum}). Finishing cleanup...")
+    else:
+        print_green("Second shutdown signal received. Exiting sooner after current cleanup point.")
+
+
+def _safe_close(obj, name: str):
+    if obj is None:
+        return
+    close_fn = getattr(obj, "close", None)
+    if callable(close_fn):
+        try:
+            close_fn()
+        except Exception as exc:
+            print(f"[cleanup-warning] failed to close {name}: {exc}")
+        return
+    stop_fn = getattr(obj, "stop", None)
+    if callable(stop_fn):
+        try:
+            stop_fn()
+        except Exception as exc:
+            print(f"[cleanup-warning] failed to stop {name}: {exc}")
 
 
 def _normalize_runtime_paths():
@@ -211,108 +240,119 @@ def actor(tasks, agent, data_store, intvn_data_store, env, sampling_rng):
     trajectory = []
 
     pbar = tqdm.tqdm(range(start_step, config.max_steps), dynamic_ncols=True)
-    for step in pbar:
-        timer.tick("total")
+    client_ref = None
+    try:
+        client_ref = client
+        for step in pbar:
+            if _SHUTDOWN_REQUESTED:
+                break
+            timer.tick("total")
 
-        with timer.context("sample_actions"):
-            if step < config.random_steps:
-                actions = env.action_space.sample()
-            else:
-                sampling_rng, key = jax.random.split(sampling_rng)
-                actions, action_embeddings = agent.sample_actions(
-                    observations=jax.device_put(obs),
-                    tasks=jax.device_put(tasks),
-                    seed=key,
-                    argmax=False,
+            with timer.context("sample_actions"):
+                if step < config.random_steps:
+                    actions = env.action_space.sample()
+                else:
+                    sampling_rng, key = jax.random.split(sampling_rng)
+                    actions, action_embeddings = agent.sample_actions(
+                        observations=jax.device_put(obs),
+                        tasks=jax.device_put(tasks),
+                        seed=key,
+                        argmax=False,
+                    )
+                    actions = np.asarray(jax.device_get(actions))
+
+            # Step environment
+            with timer.context("step_env"):
+                next_obs, reward, done, truncated, info = env.step(actions)
+                if "left" in info:
+                    info.pop("left")
+                if "right" in info:
+                    info.pop("right")
+
+                # override the action with the intervention action
+                if "intervene_action" in info:
+                    actions = info.pop("intervene_action")
+                    intervention_steps += 1
+                    if not already_intervened:
+                        intervention_count += 1
+                    already_intervened = True
+                else:
+                    already_intervened = False
+
+                running_return += reward
+                transition = dict(
+                    observations=obs,
+                    actions=actions,
+                    next_observations=next_obs,
+                    rewards=reward,
+                    masks=1.0 - done,
+                    dones=done,
+                    intervened=already_intervened,
+                    embeddings=action_embeddings,
                 )
-                actions = np.asarray(jax.device_get(actions))
+                if 'grasp_penalty' in info:
+                    transition['grasp_penalty'] = info['grasp_penalty']
 
-        # Step environment
-        with timer.context("step_env"):
-            next_obs, reward, done, truncated, info = env.step(actions)
-            if "left" in info:
-                info.pop("left")
-            if "right" in info:
-                info.pop("right")
+                trajectory.append(transition)
 
-            # override the action with the intervention action
-            if "intervene_action" in info:
-                actions = info.pop("intervene_action")
-                intervention_steps += 1
-                if not already_intervened:
-                    intervention_count += 1
-                already_intervened = True
-            else:
-                already_intervened = False
+                obs = next_obs
+                if done or truncated:
+                    trajectory = add_mc_returns_to_trajectory(trajectory, FLAGS.gamma,
+                                                              FLAGS.reward_scale, FLAGS.reward_bias, FLAGS.reward_neg, is_sparse_reward=False
+                                                              )
+                    trajectory = add_next_embeddings_to_trajectory(trajectory)
+                    for transition in trajectory:
+                        data_store.insert(transition)
+                        transitions.append(copy.deepcopy(transition))
+                        if transition['intervened']:
+                            intvn_data_store.insert(transition)
+                            demo_transitions.append(copy.deepcopy(transition))
 
-            running_return += reward
-            transition = dict(
-                observations=obs,
-                actions=actions,
-                next_observations=next_obs,
-                rewards=reward,
-                masks=1.0 - done,
-                dones=done,
-                intervened=already_intervened,
-                embeddings=action_embeddings,
-            )
-            if 'grasp_penalty' in info:
-                transition['grasp_penalty'] = info['grasp_penalty']
+                    info["episode"]["intervention_count"] = intervention_count
+                    info["episode"]["intervention_steps"] = intervention_steps
+                    info["episode"]["succeed"] = int(info['succeed'])
+                    info["episode"]["total_steps"] = step
+                    # send stats to the learner to log
+                    stats = {"environment": info}
+                    client.request("send-stats", stats)
+                    pbar.set_description(f"last return: {running_return}")
+                    running_return = 0.0
+                    intervention_count = 0
+                    intervention_steps = 0
+                    already_intervened = False
+                    client.update()
+                    trajectory = []
+                    if _SHUTDOWN_REQUESTED:
+                        break
+                    obs, _ = env.reset()
 
-            trajectory.append(transition)
+            if step > 0 and config.buffer_period > 0 and step % config.buffer_period == 0:
+                # dump to pickle file
+                buffer_path = os.path.join(FLAGS.checkpoint_path, "buffer")
+                demo_buffer_path = os.path.join(
+                    FLAGS.checkpoint_path, "demo_buffer")
+                if not os.path.exists(buffer_path):
+                    os.makedirs(buffer_path)
+                if not os.path.exists(demo_buffer_path):
+                    os.makedirs(demo_buffer_path)
+                with open(os.path.join(buffer_path, f"transitions_{step}.pkl"), "wb") as f:
+                    pkl.dump(transitions, f)
+                    transitions = []
+                with open(
+                    os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb"
+                ) as f:
+                    pkl.dump(demo_transitions, f)
+                    demo_transitions = []
 
-            obs = next_obs
-            if done or truncated:
-                trajectory = add_mc_returns_to_trajectory(trajectory, FLAGS.gamma,
-                                                          FLAGS.reward_scale, FLAGS.reward_bias, FLAGS.reward_neg, is_sparse_reward=False
-                                                          )
-                trajectory = add_next_embeddings_to_trajectory(trajectory)
-                for transition in trajectory:
-                    data_store.insert(transition)
-                    transitions.append(copy.deepcopy(transition))
-                    if transition['intervened']:
-                        intvn_data_store.insert(transition)
-                        demo_transitions.append(copy.deepcopy(transition))
+            timer.tock("total")
 
-                info["episode"]["intervention_count"] = intervention_count
-                info["episode"]["intervention_steps"] = intervention_steps
-                info["episode"]["succeed"] = int(info['succeed'])
-                info["episode"]["total_steps"] = step
-                # send stats to the learner to log
-                stats = {"environment": info}
+            if step % config.log_period == 0:
+                stats = {"timer": timer.get_average_times()}
                 client.request("send-stats", stats)
-                pbar.set_description(f"last return: {running_return}")
-                running_return = 0.0
-                intervention_count = 0
-                intervention_steps = 0
-                already_intervened = False
-                client.update()
-                trajectory = []
-                obs, _ = env.reset()
-
-        if step > 0 and config.buffer_period > 0 and step % config.buffer_period == 0:
-            # dump to pickle file
-            buffer_path = os.path.join(FLAGS.checkpoint_path, "buffer")
-            demo_buffer_path = os.path.join(
-                FLAGS.checkpoint_path, "demo_buffer")
-            if not os.path.exists(buffer_path):
-                os.makedirs(buffer_path)
-            if not os.path.exists(demo_buffer_path):
-                os.makedirs(demo_buffer_path)
-            with open(os.path.join(buffer_path, f"transitions_{step}.pkl"), "wb") as f:
-                pkl.dump(transitions, f)
-                transitions = []
-            with open(
-                os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb"
-            ) as f:
-                pkl.dump(demo_transitions, f)
-                demo_transitions = []
-
-        timer.tock("total")
-
-        if step % config.log_period == 0:
-            stats = {"timer": timer.get_average_times()}
-            client.request("send-stats", stats)
+    finally:
+        pbar.close()
+        _safe_close(client_ref, "trainer_client")
+        _safe_close(env, "environment")
 
 
 ##############################################################################
@@ -363,10 +403,27 @@ def learner(rng, tasks, agent, replay_buffer, demo_buffer, wandb_logger=None):
         return batch_dict
 
     # Pretrain the model with the demo data
-    if step < FLAGS.pretrain_steps:
-        print_green("Pretraining the model with demo data")
-        for step in tqdm.tqdm(range(start_step, FLAGS.pretrain_steps + 1), desc="pretraining"):
-            for _ in range(config.cta_ratio - 1):
+    try:
+        if step < FLAGS.pretrain_steps:
+            print_green("Pretraining the model with demo data")
+            for step in tqdm.tqdm(range(start_step, FLAGS.pretrain_steps + 1), desc="pretraining"):
+                if _SHUTDOWN_REQUESTED:
+                    break
+                for _ in range(config.cta_ratio - 1):
+                    batch = next(demo_buffer.get_iterator(
+                        sample_args={"batch_size": config.batch_size,
+                                     "pack_obs": True, },
+                        device=sharding.replicate(),
+                    ))
+
+                    batch = {
+                        **batch,
+                        "tasks": create_batch_tasks(tasks, config.batch_size),
+                    }
+                    batch = frozen_dict.freeze(batch)
+                    agent, critics_info = agent.update_calql(
+                        batch, networks_to_update=train_critic_networks_to_update,)
+
                 batch = next(demo_buffer.get_iterator(
                     sample_args={"batch_size": config.batch_size,
                                  "pack_obs": True, },
@@ -378,116 +435,108 @@ def learner(rng, tasks, agent, replay_buffer, demo_buffer, wandb_logger=None):
                     "tasks": create_batch_tasks(tasks, config.batch_size),
                 }
                 batch = frozen_dict.freeze(batch)
-                agent, critics_info = agent.update_calql(
-                    batch, networks_to_update=train_critic_networks_to_update,)
 
-            batch = next(demo_buffer.get_iterator(
-                sample_args={"batch_size": config.batch_size,
-                             "pack_obs": True, },
-                device=sharding.replicate(),
-            ))
+                agent, update_info = agent.update_calql(
+                    batch, networks_to_update=train_networks_to_update,)
 
-            batch = {
-                **batch,
-                "tasks": create_batch_tasks(tasks, config.batch_size),
-            }
-            batch = frozen_dict.freeze(batch)
+                if step % config.log_period == 0 and wandb_logger:
+                    wandb_logger.log(update_info, step=step)
 
-            agent, update_info = agent.update_calql(
-                batch, networks_to_update=train_networks_to_update,)
+                if (step > 0 and config.checkpoint_period and step % config.checkpoint_period == 0):
+                    checkpoints.save_checkpoint(
+                        FLAGS.checkpoint_path, agent.state, step=step, keep=100)
 
-            if step % config.log_period == 0 and wandb_logger:
-                wandb_logger.log(update_info, step=step)
+            print_green("Pretraining done")
+            return  # after pretraining, return and exit
+        else:
+            print_green(
+                "Existing pretrained checkpoint model found. Skipping pretraining")
 
-            if (step > 0 and config.checkpoint_period and step % config.checkpoint_period == 0):
-                checkpoints.save_checkpoint(
-                    FLAGS.checkpoint_path, agent.state, step=step, keep=100)
+        agent = jax.block_until_ready(agent)
+        server.publish_network(agent.state.params)
 
-        print_green("Pretraining done")
-        return  # after pretraining, return and exit
-    else:
-        print_green(
-            "Existing pretrained checkpoint model found. Skipping pretraining")
-
-    agent = jax.block_until_ready(agent)
-    server.publish_network(agent.state.params)
-
-    # Loop to wait until replay_buffer is filled
-    pbar = tqdm.tqdm(
-        total=config.training_starts,
-        initial=len(replay_buffer),
-        desc="Filling up replay buffer",
-        position=0,
-        leave=True,
-    )
-    while len(replay_buffer) < config.training_starts:
+        # Loop to wait until replay_buffer is filled
+        pbar = tqdm.tqdm(
+            total=config.training_starts,
+            initial=len(replay_buffer),
+            desc="Filling up replay buffer",
+            position=0,
+            leave=True,
+        )
+        while len(replay_buffer) < config.training_starts:
+            if _SHUTDOWN_REQUESTED:
+                break
+            pbar.update(len(replay_buffer) - pbar.n)  # Update progress bar
+            time.sleep(1)
         pbar.update(len(replay_buffer) - pbar.n)  # Update progress bar
-        time.sleep(1)
-    pbar.update(len(replay_buffer) - pbar.n)  # Update progress bar
-    pbar.close()
+        pbar.close()
 
-    # send the initial network to the actor
-    server.publish_network(agent.state.params)
-    print_green("sent initial network to actor")
+        # send the initial network to the actor
+        server.publish_network(agent.state.params)
+        print_green("sent initial network to actor")
 
-    # 50/50 sampling from RLPD, half from demo and half from online experience
-    replay_iterator = replay_buffer.get_iterator(
-        sample_args={"batch_size": config.batch_size // 2, "pack_obs": True, },
-        device=sharding.replicate(),
-    )
-    demo_iterator = demo_buffer.get_iterator(
-        sample_args={"batch_size": config.batch_size // 2, "pack_obs": True, },
-        device=sharding.replicate(),
-    )
+        # 50/50 sampling from RLPD, half from demo and half from online experience
+        replay_iterator = replay_buffer.get_iterator(
+            sample_args={"batch_size": config.batch_size // 2, "pack_obs": True, },
+            device=sharding.replicate(),
+        )
+        demo_iterator = demo_buffer.get_iterator(
+            sample_args={"batch_size": config.batch_size // 2, "pack_obs": True, },
+            device=sharding.replicate(),
+        )
 
-    # wait till the replay buffer is filled with enough data
-    timer = Timer()
+        # wait till the replay buffer is filled with enough data
+        timer = Timer()
 
-    # Start online training after offline pretraining
-    online_start_step = FLAGS.pretrain_steps + \
-        1 if online_start_step < FLAGS.pretrain_steps else online_start_step
-    for step in tqdm.tqdm(range(online_start_step, config.max_steps), dynamic_ncols=True, desc="learner"):
-        # run n-1 critic updates and 1 critic + actor update.
-        # This makes training on GPU faster by reducing the large batch transfer time from CPU to GPU
-        for critic_step in range(config.cta_ratio - 1):
-            with timer.context("sample_replay_buffer"):
+        # Start online training after offline pretraining
+        online_start_step = FLAGS.pretrain_steps + \
+            1 if online_start_step < FLAGS.pretrain_steps else online_start_step
+        for step in tqdm.tqdm(range(online_start_step, config.max_steps), dynamic_ncols=True, desc="learner"):
+            if _SHUTDOWN_REQUESTED:
+                break
+            # run n-1 critic updates and 1 critic + actor update.
+            # This makes training on GPU faster by reducing the large batch transfer time from CPU to GPU
+            for critic_step in range(config.cta_ratio - 1):
+                with timer.context("sample_replay_buffer"):
+                    batch = next(replay_iterator)
+                    demo_batch = next(demo_iterator)
+                    batch = concat_batches(batch, demo_batch, axis=0)
+
+                    batch = {
+                        **batch,
+                        "tasks": create_batch_tasks(tasks, config.batch_size),
+                    }
+                batch = frozen_dict.freeze(batch)
+
+                with timer.context("train_critics"):
+                    agent, critics_info = agent.update_ql(
+                        batch, networks_to_update=train_critic_networks_to_update,)
+
+            with timer.context("train"):
                 batch = next(replay_iterator)
                 demo_batch = next(demo_iterator)
                 batch = concat_batches(batch, demo_batch, axis=0)
-
                 batch = {
                     **batch,
                     "tasks": create_batch_tasks(tasks, config.batch_size),
                 }
-            batch = frozen_dict.freeze(batch)
+                batch = frozen_dict.freeze(batch)
+                agent, update_info = agent.update_ql(
+                    batch, networks_to_update=train_networks_to_update,)
+            # publish the updated network
+            if step > 0 and step % (config.steps_per_update) == 0:
+                agent = jax.block_until_ready(agent)
+                server.publish_network(agent.state.params)
 
-            with timer.context("train_critics"):
-                agent, critics_info = agent.update_ql(
-                    batch, networks_to_update=train_critic_networks_to_update,)
+            if step % config.log_period == 0 and wandb_logger:
+                wandb_logger.log(update_info, step=step)
+                wandb_logger.log({"timer": timer.get_average_times()}, step=step)
 
-        with timer.context("train"):
-            batch = next(replay_iterator)
-            demo_batch = next(demo_iterator)
-            batch = concat_batches(batch, demo_batch, axis=0)
-            batch = {
-                **batch,
-                "tasks": create_batch_tasks(tasks, config.batch_size),
-            }
-            batch = frozen_dict.freeze(batch)
-            agent, update_info = agent.update_ql(
-                batch, networks_to_update=train_networks_to_update,)
-        # publish the updated network
-        if step > 0 and step % (config.steps_per_update) == 0:
-            agent = jax.block_until_ready(agent)
-            server.publish_network(agent.state.params)
-
-        if step % config.log_period == 0 and wandb_logger:
-            wandb_logger.log(update_info, step=step)
-            wandb_logger.log({"timer": timer.get_average_times()}, step=step)
-
-        if (step > 0 and config.checkpoint_period and step % config.checkpoint_period == 0):
-            checkpoints.save_checkpoint(
-                FLAGS.checkpoint_path, agent.state, step=step, keep=100)
+            if (step > 0 and config.checkpoint_period and step % config.checkpoint_period == 0):
+                checkpoints.save_checkpoint(
+                    FLAGS.checkpoint_path, agent.state, step=step, keep=100)
+    finally:
+        _safe_close(server, "trainer_server")
 
 
 ##############################################################################
@@ -495,6 +544,8 @@ def learner(rng, tasks, agent, replay_buffer, demo_buffer, wandb_logger=None):
 
 def main(_):
     global config
+    signal.signal(signal.SIGINT, _request_shutdown)
+    signal.signal(signal.SIGTERM, _request_shutdown)
     _normalize_runtime_paths()
     config = CONFIG_MAPPING[FLAGS.exp_name]()
 
@@ -515,172 +566,171 @@ def main(_):
     octo_model = OctoModel.load_pretrained(config.octo_path)
     tasks = octo_model.create_tasks(texts=[config.task_desc])
 
-    if config.setup_mode == 'single-arm-fixed-gripper':
-        agent: ConrftCPOctoAgentSingleArm = make_conrft_octo_cp_pixel_agent_single_arm(
-            seed=FLAGS.seed,
-            sample_obs=env.observation_space.sample(),
-            sample_action=env.action_space.sample(),
-            sample_tasks=tasks,
-            octo_model=octo_model,
-            image_keys=config.image_keys,
-            encoder_type=config.encoder_type,
-            discount=config.discount,
-            fix_gripper=True,
-            q_weight=FLAGS.q_weight,
-            bc_weight=FLAGS.bc_weight,
-        )
-        include_grasp_penalty = False
-        include_octo_embeddings = True
-        include_mc_returns = True
-    elif config.setup_mode == 'single-arm-learned-gripper':
-        agent: ConrftCPOctoAgentSingleArm = make_conrft_octo_cp_pixel_agent_single_arm(
-            seed=FLAGS.seed,
-            sample_obs=env.observation_space.sample(),
-            sample_action=env.action_space.sample(),
-            sample_tasks=tasks,
-            octo_model=octo_model,
-            image_keys=config.image_keys,
-            encoder_type=config.encoder_type,
-            discount=config.discount,
-            q_weight=FLAGS.q_weight,
-            bc_weight=FLAGS.bc_weight,
-        )
-        include_grasp_penalty = True
-        include_octo_embeddings = True
-        include_mc_returns = True
-    else:
-        raise NotImplementedError(f"Unknown setup mode: {config.setup_mode}")
-
-    # replicate agent across devices
-    # need the jnp.array to avoid a bug where device_put doesn't recognize primitives
-    agent = jax.device_put(jax.tree_map(
-        jnp.array, agent), sharding.replicate())
-
-    if FLAGS.checkpoint_path is not None and os.path.exists(FLAGS.checkpoint_path):
-        latest_ckpt = checkpoints.latest_checkpoint(FLAGS.checkpoint_path)
-        # orbax 失败时可能只留下 *.orbax-checkpoint-tmp-* 临时目录，
-        # 这时 latest_checkpoint 会返回 None，不能按“可恢复 checkpoint”处理。
-        if latest_ckpt is None:
-            print_green(
-                f"No completed checkpoint found under {FLAGS.checkpoint_path}. "
-                "Skipping checkpoint restore."
+    try:
+        if config.setup_mode == 'single-arm-fixed-gripper':
+            agent: ConrftCPOctoAgentSingleArm = make_conrft_octo_cp_pixel_agent_single_arm(
+                seed=FLAGS.seed,
+                sample_obs=env.observation_space.sample(),
+                sample_action=env.action_space.sample(),
+                sample_tasks=tasks,
+                octo_model=octo_model,
+                image_keys=config.image_keys,
+                encoder_type=config.encoder_type,
+                discount=config.discount,
+                fix_gripper=True,
+                q_weight=FLAGS.q_weight,
+                bc_weight=FLAGS.bc_weight,
             )
+            include_grasp_penalty = False
+            include_octo_embeddings = True
+            include_mc_returns = True
+        elif config.setup_mode == 'single-arm-learned-gripper':
+            agent: ConrftCPOctoAgentSingleArm = make_conrft_octo_cp_pixel_agent_single_arm(
+                seed=FLAGS.seed,
+                sample_obs=env.observation_space.sample(),
+                sample_action=env.action_space.sample(),
+                sample_tasks=tasks,
+                octo_model=octo_model,
+                image_keys=config.image_keys,
+                encoder_type=config.encoder_type,
+                discount=config.discount,
+                q_weight=FLAGS.q_weight,
+                bc_weight=FLAGS.bc_weight,
+            )
+            include_grasp_penalty = True
+            include_octo_embeddings = True
+            include_mc_returns = True
         else:
-            if not FLAGS.learner:
-                input("Checkpoint path already exists. Press Enter to resume training.")
-            ckpt = checkpoints.restore_checkpoint(
-                FLAGS.checkpoint_path, agent.state,)
-            # agent = agent.replace(state=ckpt)
+            raise NotImplementedError(f"Unknown setup mode: {config.setup_mode}")
 
-            # Update params only, ignore the optimizer states
-            new_params = ckpt.params
-            new_target_params = ckpt.target_params
+        # replicate agent across devices
+        # need the jnp.array to avoid a bug where device_put doesn't recognize primitives
+        agent = jax.device_put(jax.tree_map(
+            jnp.array, agent), sharding.replicate())
 
-            agent = agent.replace(state=agent.state.replace(
-                params=new_params, target_params=new_target_params))
+        if FLAGS.checkpoint_path is not None and os.path.exists(FLAGS.checkpoint_path):
+            latest_ckpt = checkpoints.latest_checkpoint(FLAGS.checkpoint_path)
+            # orbax 失败时可能只留下 *.orbax-checkpoint-tmp-* 临时目录，
+            # 这时 latest_checkpoint 会返回 None，不能按“可恢复 checkpoint”处理。
+            if latest_ckpt is None:
+                print_green(
+                    f"No completed checkpoint found under {FLAGS.checkpoint_path}. "
+                    "Skipping checkpoint restore."
+                )
+            else:
+                if not FLAGS.learner:
+                    input("Checkpoint path already exists. Press Enter to resume training.")
+                ckpt = checkpoints.restore_checkpoint(
+                    FLAGS.checkpoint_path, agent.state,)
+                # Update params only, ignore the optimizer states
+                new_params = ckpt.params
+                new_target_params = ckpt.target_params
 
-            ckpt_number = os.path.basename(latest_ckpt)[11:]
-            print_green(f"Loaded previous checkpoint at step {ckpt_number}.")
+                agent = agent.replace(state=agent.state.replace(
+                    params=new_params, target_params=new_target_params))
 
-    def create_replay_buffer_and_wandb_logger():
-        replay_buffer = MemoryEfficientReplayBufferDataStore(
-            env.observation_space,
-            env.action_space,
-            capacity=config.replay_buffer_capacity,
-            image_keys=config.image_keys,
-            include_grasp_penalty=include_grasp_penalty,
-            include_octo_embeddings=include_octo_embeddings,
-            include_mc_returns=include_mc_returns,
-        )
-        # set up wandb and logging
+                ckpt_number = os.path.basename(latest_ckpt)[11:]
+                print_green(f"Loaded previous checkpoint at step {ckpt_number}.")
 
-        wandb_logger = make_wandb_logger(
-            project="conrft",
-            description=FLAGS.exp_name,
-            debug=FLAGS.debug,
-        )
+        def create_replay_buffer_and_wandb_logger():
+            replay_buffer = MemoryEfficientReplayBufferDataStore(
+                env.observation_space,
+                env.action_space,
+                capacity=config.replay_buffer_capacity,
+                image_keys=config.image_keys,
+                include_grasp_penalty=include_grasp_penalty,
+                include_octo_embeddings=include_octo_embeddings,
+                include_mc_returns=include_mc_returns,
+            )
+            # set up wandb and logging
+            wandb_logger = make_wandb_logger(
+                project="conrft",
+                description=FLAGS.exp_name,
+                debug=FLAGS.debug,
+            )
+            return replay_buffer, wandb_logger
 
-        return replay_buffer, wandb_logger
+        if FLAGS.learner:
+            sampling_rng = jax.device_put(
+                sampling_rng, device=sharding.replicate())
+            replay_buffer, wandb_logger = create_replay_buffer_and_wandb_logger()
+            demo_buffer = MemoryEfficientReplayBufferDataStore(
+                env.observation_space,
+                env.action_space,
+                capacity=config.replay_buffer_capacity,
+                image_keys=config.image_keys,
+                include_grasp_penalty=include_grasp_penalty,
+                include_octo_embeddings=include_octo_embeddings,
+                include_mc_returns=include_mc_returns,
+            )
+            assert FLAGS.demo_path is not None
 
-    if FLAGS.learner:
-        sampling_rng = jax.device_put(
-            sampling_rng, device=sharding.replicate())
-        replay_buffer, wandb_logger = create_replay_buffer_and_wandb_logger()
-        demo_buffer = MemoryEfficientReplayBufferDataStore(
-            env.observation_space,
-            env.action_space,
-            capacity=config.replay_buffer_capacity,
-            image_keys=config.image_keys,
-            include_grasp_penalty=include_grasp_penalty,
-            include_octo_embeddings=include_octo_embeddings,
-            include_mc_returns=include_mc_returns,
-        )
-        assert FLAGS.demo_path is not None
-
-        for path in FLAGS.demo_path:
-            with open(path, "rb") as f:
-                transitions = pkl.load(f)
-                for transition in transitions:
-                    transition = _resize_transition_images_to_env(
-                        transition,
-                        env.observation_space,
-                        config.image_keys,
-                    )
-                    if 'infos' in transition and 'grasp_penalty' in transition['infos']:
-                        transition['grasp_penalty'] = transition['infos']['grasp_penalty']
-                    demo_buffer.insert(transition)
-        print_green(f"demo buffer size: {len(demo_buffer)}")
-        print_green(f"online buffer size: {len(replay_buffer)}")
-
-        if FLAGS.checkpoint_path is not None and os.path.exists(os.path.join(FLAGS.checkpoint_path, "buffer")):
-            for file in glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl")):
-                with open(file, "rb") as f:
+            for path in FLAGS.demo_path:
+                with open(path, "rb") as f:
                     transitions = pkl.load(f)
                     for transition in transitions:
-                        replay_buffer.insert(transition)
-            print_green(
-                f"Loaded previous buffer data. Replay buffer size: {len(replay_buffer)}")
-
-        if FLAGS.checkpoint_path is not None and os.path.exists(
-            os.path.join(FLAGS.checkpoint_path, "demo_buffer")
-        ):
-            for file in glob.glob(
-                os.path.join(FLAGS.checkpoint_path, "demo_buffer/*.pkl")
-            ):
-                with open(file, "rb") as f:
-                    transitions = pkl.load(f)
-                    for transition in transitions:
+                        transition = _resize_transition_images_to_env(
+                            transition,
+                            env.observation_space,
+                            config.image_keys,
+                        )
+                        if 'infos' in transition and 'grasp_penalty' in transition['infos']:
+                            transition['grasp_penalty'] = transition['infos']['grasp_penalty']
                         demo_buffer.insert(transition)
-            print_green(
-                f"Loaded previous demo buffer data. Demo buffer size: {len(demo_buffer)}")
+            print_green(f"demo buffer size: {len(demo_buffer)}")
+            print_green(f"online buffer size: {len(replay_buffer)}")
 
-        # learner loop
-        print_green("starting learner loop")
-        learner(sampling_rng,
+            if FLAGS.checkpoint_path is not None and os.path.exists(os.path.join(FLAGS.checkpoint_path, "buffer")):
+                for file in glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl")):
+                    with open(file, "rb") as f:
+                        transitions = pkl.load(f)
+                        for transition in transitions:
+                            replay_buffer.insert(transition)
+                print_green(
+                    f"Loaded previous buffer data. Replay buffer size: {len(replay_buffer)}")
+
+            if FLAGS.checkpoint_path is not None and os.path.exists(
+                os.path.join(FLAGS.checkpoint_path, "demo_buffer")
+            ):
+                for file in glob.glob(
+                    os.path.join(FLAGS.checkpoint_path, "demo_buffer/*.pkl")
+                ):
+                    with open(file, "rb") as f:
+                        transitions = pkl.load(f)
+                        for transition in transitions:
+                            demo_buffer.insert(transition)
+                print_green(
+                    f"Loaded previous demo buffer data. Demo buffer size: {len(demo_buffer)}")
+
+            print_green("starting learner loop")
+            learner(
+                sampling_rng,
                 tasks,
                 agent,
                 replay_buffer,
                 demo_buffer=demo_buffer,
                 wandb_logger=wandb_logger,
-                )
+            )
 
-    elif FLAGS.actor:
-        sampling_rng = jax.device_put(sampling_rng, sharding.replicate())
-        data_store = QueuedDataStore(50000)  # the queue size on the actor
-        intvn_data_store = QueuedDataStore(50000)
+        elif FLAGS.actor:
+            sampling_rng = jax.device_put(sampling_rng, sharding.replicate())
+            data_store = QueuedDataStore(50000)  # the queue size on the actor
+            intvn_data_store = QueuedDataStore(50000)
 
-        # actor loop
-        print_green("starting actor loop")
-        actor(tasks,
-              agent,
-              data_store,
-              intvn_data_store,
-              env,
-              sampling_rng,
-              )
+            print_green("starting actor loop")
+            actor(
+                tasks,
+                agent,
+                data_store,
+                intvn_data_store,
+                env,
+                sampling_rng,
+            )
 
-    else:
-        raise NotImplementedError("Must be either a learner or an actor")
+        else:
+            raise NotImplementedError("Must be either a learner or an actor")
+    finally:
+        _safe_close(env, "environment")
 
 
 if __name__ == "__main__":

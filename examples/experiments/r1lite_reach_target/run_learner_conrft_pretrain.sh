@@ -1,6 +1,7 @@
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
 export PYTHONPATH="${REPO_ROOT}/examples:${REPO_ROOT}/serl_robot_infra:${REPO_ROOT}/serl_launcher:${PYTHONPATH}"
+export R1LITE_TRAIN_STAGE=offline
 
 CFG_MODULE=experiments.r1lite_reach_target.config
 cfg_value() {

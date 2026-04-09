@@ -20,6 +20,7 @@ from experiments.r1lite_reach_target.wrapper import ReachTargetRewardWrapper, Re
 
 _CONFIG_DIR = Path(__file__).resolve().parent
 _CONFIG_PATH = Path(os.environ.get("R1LITE_REACH_CONFIG", _CONFIG_DIR / "config.yaml"))
+_TRAIN_STAGE = os.environ.get("R1LITE_TRAIN_STAGE", "offline").strip().lower()
 
 
 def _load_user_config() -> dict:
@@ -44,6 +45,14 @@ def _cfg(path: str, default):
     return current
 
 
+def _train_cfg(path: str, default):
+    """按训练阶段读取参数，online 缺省时自动回落到 offline。"""
+    if _TRAIN_STAGE == "online":
+        offline_default = _cfg(f"offline_training.{path}", default)
+        return _cfg(f"online_training.{path}", offline_default)
+    return _cfg(f"offline_training.{path}", default)
+
+
 def _runtime_defaults() -> dict:
     """集中返回脚本运行时默认值，供 bash 启动脚本和 Python 侧共用。"""
     return {
@@ -57,6 +66,28 @@ def _runtime_defaults() -> dict:
         "debug": bool(_cfg("offline_training.debug", False)),
         "xla_mem_fraction_pretrain": float(_cfg("offline_training.pretrain.xla_mem_fraction", 0.85)),
         "xla_mem_fraction_learner": float(_cfg("offline_training.learner.xla_mem_fraction", 0.5)),
+        # 在线阶段默认允许显式覆盖 offline 阶段的 checkpoint/demo 配置。
+        "online_checkpoint_path": _cfg(
+            "online_training.checkpoint_path",
+            _cfg("offline_training.checkpoint_path", "./conrft"),
+        ),
+        "online_demo_path": _cfg(
+            "online_training.demo_path",
+            _cfg("offline_training.demo_path", "./demo_data/replace_me.pkl"),
+        ),
+        "online_pretrain_steps": int(
+            _cfg("online_training.pretrain_steps", _cfg("offline_training.pretrain_steps", 20000))
+        ),
+        "online_q_weight": float(
+            _cfg("online_training.learner.q_weight", _cfg("offline_training.learner.q_weight", 1.0))
+        ),
+        "online_bc_weight": float(
+            _cfg("online_training.learner.bc_weight", _cfg("offline_training.learner.bc_weight", 0.1))
+        ),
+        "online_debug": bool(_cfg("online_training.debug", _cfg("offline_training.debug", False))),
+        "xla_mem_fraction_online_learner": float(
+            _cfg("online_training.learner.xla_mem_fraction", _cfg("offline_training.learner.xla_mem_fraction", 0.5))
+        ),
         "xla_mem_fraction_actor": float(_cfg("online_training.actor.xla_mem_fraction", 0.2)),
     }
 
@@ -125,14 +156,18 @@ class TrainConfig(DefaultTrainingConfig):
     arm = _cfg("train.arm", "right")
     image_keys = list(_cfg("train.image_keys", ["image_primary", "image_wrist"])) # 头部相机 + 腕部相机
     proprio_keys = ["tcp_pose", "tcp_vel", "tcp_force", "tcp_torque", "gripper_pose"]
-    # 这些参数会直接影响离线/在线训练显存和吞吐，统一挪到 YAML 方便按机器调。
-    batch_size = int(_cfg("offline_training.batch_size", 256))
-    replay_buffer_capacity = int(_cfg("offline_training.replay_buffer_capacity", 200000))
-    checkpoint_period = int(_cfg("offline_training.checkpoint_period", 2000))
-    cta_ratio = int(_cfg("offline_training.cta_ratio", 2))
+    # 这些参数直接进入训练循环，按 offline / online 阶段分别读取。
+    batch_size = int(_train_cfg("batch_size", 256))
+    replay_buffer_capacity = int(_train_cfg("replay_buffer_capacity", 200000))
+    checkpoint_period = int(_train_cfg("checkpoint_period", 2000))
+    cta_ratio = int(_train_cfg("cta_ratio", 2))
     random_steps = 0
-    discount = float(_cfg("offline_training.discount", 0.98))
-    buffer_period = int(_cfg("offline_training.buffer_period", 1000))
+    discount = float(_train_cfg("discount", 0.98))
+    buffer_period = int(_train_cfg("buffer_period", 1000))
+    training_starts = int(_train_cfg("training_starts", DefaultTrainingConfig.training_starts))
+    steps_per_update = int(_train_cfg("steps_per_update", DefaultTrainingConfig.steps_per_update))
+    log_period = int(_train_cfg("log_period", DefaultTrainingConfig.log_period))
+    eval_period = int(_train_cfg("eval_period", DefaultTrainingConfig.eval_period))
     encoder_type = "resnet-pretrained"
     # 参考 Franka reach / pregrasp 场景：当前任务不学习夹爪，策略只关心 6DoF 末端动作。
     setup_mode = _cfg("train.setup_mode", "single-arm-fixed-gripper")

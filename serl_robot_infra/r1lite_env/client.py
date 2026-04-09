@@ -82,3 +82,6 @@ class R1LiteClient:
         response = self.session.post(self._url("reset"), json=payload, timeout=self.timeout)
         response.raise_for_status()
         return response.json()
+
+    def close(self):
+        self.session.close()

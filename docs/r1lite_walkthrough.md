@@ -313,6 +313,34 @@ During actor rollout:
 
 Use SpaceMouse whenever the policy drifts or explores inefficiently.
 
+The online stage now has its own config section in
+[config.yaml](../examples/experiments/r1lite_reach_target/config.yaml):
+
+- `online_training.checkpoint_path`
+  Which checkpoint directory to resume from. This is typically the offline
+  pretrain output, but you can point it to another run explicitly.
+- `online_training.demo_path`
+  Which demo file the online learner should continue to mix with online data.
+- `online_training.pretrain_steps`
+  The step boundary used by the learner to decide whether pretraining is
+  already complete when resuming.
+- `online_training.batch_size`
+- `online_training.replay_buffer_capacity`
+- `online_training.cta_ratio`
+- `online_training.discount`
+- `online_training.checkpoint_period`
+- `online_training.buffer_period`
+- `online_training.training_starts`
+- `online_training.steps_per_update`
+- `online_training.log_period`
+- `online_training.eval_period`
+- `online_training.learner.q_weight` / `online_training.learner.bc_weight`
+  Online learner actor-loss weights.
+- `online_training.learner.xla_mem_fraction`
+  JAX memory fraction for the online learner process.
+- `online_training.actor.xla_mem_fraction`
+  JAX memory fraction for the actor process.
+
 ## 7. Recommended Files And Outputs
 
 Important inputs:
