@@ -1,0 +1,121 @@
+env:
+  server_url: "http://192.168.12.12:8001/"
+  max_episode_length: 1000
+  default_mode: "ee_pose_servo"
+  default_preset: "free_space"
+  random_reset: false
+  random_xy_range: 0.015
+  random_rz_range: 0.15
+  reset_settle_sec: 0.5
+  reset_wait_timeout_sec: 15.0
+  reset_fail_on_timeout: true
+  reset_poll_sec: 0.1
+  reset_stable_count: 4
+  reset_debug: false
+  reset_position_tolerance_m: 0.03
+  reset_orientation_tolerance_rad: 0.35
+  reset_joint_tolerance_rad: 0.08
+  reset_stable_pos_eps_m: 0.005
+  reset_stable_ori_eps_rad: 0.08
+  reset_stable_joint_eps_rad: 0.03
+  # 全 0 表示不发送末端 pose reset，而是回落到服务端默认 joint reset。
+  reset_right_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  reset_left_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  reset_right_joint: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  reset_left_joint: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  abs_pose_limit_low:
+    left: [0.22, -0.42, 0.18, -3.141592653589793, -3.141592653589793, -3.141592653589793]
+    right: [-0.10, -0.85, 0.27, -3.141592653589793, -3.141592653589793, -3.141592653589793]
+  abs_pose_limit_high:
+    left: [0.55, -0.05, 0.45, 3.141592653589793, 3.141592653589793, 3.141592653589793]
+    right: [0.60, -0.19, 0.70, 3.141592653589793, 3.141592653589793, 3.141592653589793]
+
+control:
+  hz: 10.0
+  xyz_scale: 0.03
+  rot_scale: 0.20
+  debug_effective_hz: false
+
+train:
+  arm: "dual"
+  image_keys: ["head", "left_wrist", "right_wrist"]
+  setup_mode: "dual-arm-learned-gripper"
+  task_desc: "左臂抓住白色的框放在右臂的周围，右臂抓住发红的芒果，把它放入框内，然后左右机械臂复位。"
+  octo_path: "hf://rail-berkeley/octo-small-1.5"
+
+offline_training:
+  batch_size: 256
+  replay_buffer_capacity: 200000
+  cta_ratio: 2
+  discount: 0.98
+  checkpoint_period: 2000
+  buffer_period: 1000
+  checkpoint_path: "./conrft"
+  demo_path: "./demo_data/replace_me.pkl"
+  pretrain_steps: 20000
+  debug: false
+  pretrain:
+    q_weight: 0.1
+    bc_weight: 1.0
+    xla_mem_fraction: 0.85
+  learner:
+    q_weight: 1.0
+    bc_weight: 0.1
+    xla_mem_fraction: 0.5
+
+online_training:
+  checkpoint_path: "./conrft"
+  demo_path: "./demo_data/replace_me.pkl"
+  pretrain_steps: 20000
+  debug: false
+  batch_size: 8
+  replay_buffer_capacity: 200000
+  cta_ratio: 2
+  discount: 0.98
+  checkpoint_period: 2000
+  buffer_period: 1000
+  training_starts: 100
+  steps_per_update: 50
+  log_period: 10
+  eval_period: 2000
+  learner:
+    q_weight: 1.0
+    bc_weight: 0.1
+    xla_mem_fraction: 0.5
+  actor:
+    xla_mem_fraction: 0.45
+
+task:
+  task_name: "r1lite_dual_mango_box"
+  task_desc: "左臂抓住白色的框放在右臂的周围，右臂抓住发红的芒果，把它放入框内，然后左右机械臂复位。"
+  reward_neg: -0.05
+  success_reward: 10.0
+  success_on_episode_end: true
+
+reward_model:
+  # SARM online reward is off by default. Enable after training a LeRobot SARM
+  # model and starting a sidecar progress server.
+  enabled: false
+  log_only: true
+  endpoint_url: null
+  checkpoint_path: null
+  head_mode: "sparse"
+  image_key: "head"
+  success_threshold: 0.95
+  success_reward: 10.0
+  reward_scale: 1.0
+  reward_bias: 0.0
+  reward_clip_low: -1.0
+  reward_clip_high: 1.0
+  timeout: 2.0
+
+teleop:
+  calibrate_seconds: 0.5
+  trans_deadzone: 0.08
+  rot_deadzone: 0.08
+  activate_threshold: 0.001
+  release_threshold: 0.001
+
+gripper:
+  fixed_open: false
+  open_value: 100.0

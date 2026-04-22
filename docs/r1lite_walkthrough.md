@@ -172,7 +172,7 @@ What the script does:
 - adds Octo `embeddings`
 - adds `next_embeddings`
 - writes a ConRFT-ready `.pkl` file to
-  `examples/experiments/r1lite_reach_target/demo_data`
+  `data/transition/r1lite_reach_target`
 
 Official teleop conversion path:
 
@@ -191,7 +191,7 @@ Example:
 cd /home/robot/VLA-RL/conrft-r1lite/examples
 python convert_official_teleop_to_conrft_demo.py \
     --exp_name=r1lite_reach_target \
-    --input_dir=/home/robot/VLA-RL/conrft-r1lite/20260409/RB251106041_20260409152555451_RAW \
+    --input_dir=/home/robot/VLA-RL/conrft-r1lite/data/RAW/r1lite_reach_target/RB251106041_20260409152555451_RAW \
     --dry_run \
     --output_file=/tmp/r1lite_official_teleop_plan.json
 ```
@@ -211,8 +211,8 @@ Once the conversion environment is installed, the full conversion command is:
 cd /home/robot/VLA-RL/conrft-r1lite/examples
 python convert_official_teleop_to_conrft_demo.py \
     --exp_name=r1lite_reach_target \
-    --input_dir=/home/robot/VLA-RL/conrft-r1lite/20260409/RB251106041_20260409152555451_RAW \
-    --output_file=/home/robot/VLA-RL/conrft-r1lite/20260409/r1lite_reach_target_official_teleop_stage1.pkl
+    --input_dir=/home/robot/VLA-RL/conrft-r1lite/data/RAW/r1lite_reach_target/RB251106041_20260409152555451_RAW \
+    --output_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/r1lite_reach_target_official_teleop_stage1.pkl
 ```
 
 What the full conversion currently produces:
@@ -241,8 +241,8 @@ If you want a final training `.pkl` with Octo embeddings in one command, add
 cd /home/robot/VLA-RL/conrft-r1lite/examples
 python convert_official_teleop_to_conrft_demo.py \
     --exp_name=r1lite_reach_target \
-    --input_dir=/home/robot/VLA-RL/conrft-r1lite/20260409/RB251106041_20260409152555451_RAW \
-    --output_file=/home/robot/VLA-RL/conrft-r1lite/20260409/r1lite_reach_target_official_teleop_final.pkl \
+    --input_dir=/home/robot/VLA-RL/conrft-r1lite/data/RAW/r1lite_reach_target/RB251106041_20260409152555451_RAW \
+    --output_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/r1lite_reach_target_official_teleop_final.pkl \
     --with_embeddings
 ```
 
@@ -258,13 +258,13 @@ The dry-run output is useful to verify:
 - which action reconstruction strategy will be used
 - how many RL steps the bag will produce after resampling
 
-For the current sample bag under `20260409`, the recommended dry-run command is:
+For the current sample bag under `data/RAW/r1lite_reach_target`, the recommended dry-run command is:
 
 ```bash
 cd /home/robot/VLA-RL/conrft-r1lite/examples
 python convert_official_teleop_to_conrft_demo.py \
     --exp_name=r1lite_reach_target \
-    --input_dir=/home/robot/VLA-RL/conrft-r1lite/20260409/RB251106041_20260409152555451_RAW \
+    --input_dir=/home/robot/VLA-RL/conrft-r1lite/data/RAW/r1lite_reach_target/RB251106041_20260409152555451_RAW \
     --dry_run \
     --output_file=/tmp/official_teleop_plan.json
 ```
@@ -285,7 +285,7 @@ First inspect how many trajectories are inside the `.pkl`:
 cd /home/robot/VLA-RL/conrft-r1lite/examples
 python replay_transition_r1lite.py \
     --exp_name=r1lite_reach_target \
-    --input_file=/home/robot/VLA-RL/conrft-r1lite/20260409/r1lite_reach_target_official_teleop_final.pkl \
+    --input_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/r1lite_reach_target_official_teleop_final.pkl \
     --list_only
 ```
 
@@ -295,7 +295,7 @@ Then replay one trajectory, for example trajectory `0`:
 cd /home/robot/VLA-RL/conrft-r1lite/examples
 python replay_transition_r1lite.py \
     --exp_name=r1lite_reach_target \
-    --input_file=/home/robot/VLA-RL/conrft-r1lite/20260409/r1lite_reach_target_official_teleop_final.pkl \
+    --input_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/r1lite_reach_target_official_teleop_final.pkl \
     --trajectory_index=0
 ```
 
@@ -305,6 +305,8 @@ Useful options:
 - `--no_reset_after`
 - `--reset_wait_sec=1.0`
 - `--log_every=10`
+- `--replay_mode pose_target`
+- `--replay_mode action`
 
 During replay, the script prints the position/orientation error between:
 
@@ -320,7 +322,7 @@ Set `DEMO_PATH` to the demo file recorded in the previous step:
 
 ```bash
 cd examples/experiments/r1lite_reach_target
-export DEMO_PATH=./demo_data/r1lite_reach_target_20_demos_<timestamp>.pkl
+export DEMO_PATH=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/r1lite_reach_target_20_demos_<timestamp>.pkl
 bash run_learner_conrft_pretrain.sh
 ```
 
@@ -439,7 +441,7 @@ Run both threads:
 
 ```bash
 cd examples/experiments/r1lite_reach_target
-export DEMO_PATH=./demo_data/r1lite_reach_target_20_demos_<timestamp>.pkl
+export DEMO_PATH=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/r1lite_reach_target_20_demos_<timestamp>.pkl
 bash run_learner_conrft.sh
 bash run_actor_conrft.sh
 ```
@@ -495,7 +497,7 @@ Important inputs:
 Expected outputs:
 
 - demos:
-  `examples/experiments/r1lite_reach_target/demo_data/*.pkl`
+  `data/transition/r1lite_reach_target/*.pkl`
 - checkpoints:
   `examples/experiments/r1lite_reach_target/conrft/`
 

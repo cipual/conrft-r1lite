@@ -21,10 +21,17 @@ def _load_r1lite_single_arm():
     return R1LiteSingleArmTrainConfig
 
 
+def _load_r1lite_dual_mango_box():
+    from experiments.r1lite_dual_mango_box.config import TrainConfig as R1LiteDualMangoBoxTrainConfig
+
+    return R1LiteDualMangoBoxTrainConfig
+
+
 _CONFIG_LOADERS: Dict[str, Callable[[], type]] = {
     "task1_pick_banana": _load_pick_banana,
     "r1lite_reach_target": _load_r1lite_reach_target,
     "r1lite_single_arm": _load_r1lite_single_arm,
+    "r1lite_dual_mango_box": _load_r1lite_dual_mango_box,
 }
 
 

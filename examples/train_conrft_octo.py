@@ -600,6 +600,22 @@ def main(_):
             include_grasp_penalty = True
             include_octo_embeddings = True
             include_mc_returns = True
+        elif config.setup_mode == 'dual-arm-learned-gripper':
+            agent: ConrftCPOctoAgentSingleArm = make_conrft_octo_cp_pixel_agent_single_arm(
+                seed=FLAGS.seed,
+                sample_obs=env.observation_space.sample(),
+                sample_action=env.action_space.sample(),
+                sample_tasks=tasks,
+                octo_model=octo_model,
+                image_keys=config.image_keys,
+                encoder_type=config.encoder_type,
+                discount=config.discount,
+                q_weight=FLAGS.q_weight,
+                bc_weight=FLAGS.bc_weight,
+            )
+            include_grasp_penalty = True
+            include_octo_embeddings = True
+            include_mc_returns = True
         else:
             raise NotImplementedError(f"Unknown setup mode: {config.setup_mode}")
 
