@@ -156,15 +156,15 @@ class TrainConfig(DefaultTrainingConfig):
     proprio_keys = [
         "left/tcp_pose",
         "left/tcp_vel",
-        "left/tcp_force",
-        "left/tcp_torque",
+        "left/joint_pos",
+        "left/joint_vel",
         "left/gripper_pose",
         "right/tcp_pose",
         "right/tcp_vel",
-        "right/tcp_force",
-        "right/tcp_torque",
+        "right/joint_pos",
+        "right/joint_vel",
         "right/gripper_pose",
-        "torso",
+        "torso_pos",
     ]
     batch_size = int(_train_cfg("batch_size", 256))
     replay_buffer_capacity = int(_train_cfg("replay_buffer_capacity", 200000))

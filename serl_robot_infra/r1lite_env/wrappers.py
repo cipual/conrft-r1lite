@@ -52,6 +52,7 @@ class R1LiteObsWrapper(gym.ObservationWrapper):
             "right/joint_vel": self.env.observation_space["state"]["right"]["joint_vel"],
             "right/joint_effort": self.env.observation_space["state"]["right"]["joint_effort"],
             "torso": self.env.observation_space["state"]["torso"],
+            "torso_pos": gym.spaces.Box(-np.inf, np.inf, shape=(1,), dtype=np.float32),
         }
         self.observation_space = gym.spaces.Dict(
             {
@@ -81,6 +82,7 @@ class R1LiteObsWrapper(gym.ObservationWrapper):
                 "right/joint_vel": observation["state"]["right"]["joint_vel"],
                 "right/joint_effort": observation["state"]["right"]["joint_effort"],
                 "torso": observation["state"]["torso"],
+                "torso_pos": np.asarray(observation["state"]["torso"], dtype=np.float32).reshape(-1)[:1],
             },
             "images": observation["images"],
             "meta": observation["meta"],

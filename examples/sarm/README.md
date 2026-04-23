@@ -190,7 +190,7 @@ lerobot-train \
   --policy.frame_gap=10 \
   --policy.push_to_hub=false \
   --output_dir=/home/robot/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_$(date +%Y%m%d_%H%M%S) \
-  --batch_size=16 \
+  --batch_size=4 \
   --steps=5000 \
   --num_workers=6 \
   --prefetch_factor=4 \
@@ -200,25 +200,171 @@ lerobot-train \
 Compute progress values:
 
 ```bash
-python src/lerobot/policies/sarm/compute_rabc_weights.py \
+cd /home/robot/VLA-RL/lerobot
+export HF_LEROBOT_HOME=/home/robot/VLA-RL/conrft-r1lite/data/lerobot
+export PYTHONPATH=/home/robot/VLA-RL/lerobot/src
+
+python -m lerobot.policies.sarm.compute_rabc_weights \
   --dataset-repo-id r1lite_dual_mango_box \
-  --reward-model-path outputs/train/r1lite_dual_mango_box_sarm \
-  --head-mode sparse \
-  --num-visualizations 5
+  --reward-model-path /home/robot/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_20260422_122234/checkpoints/005000/pretrained_model \
+  --head-mode dense \
+  --output-path /home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box/sarm_progress.parquet \
+  --output-dir /home/robot/VLA-RL/conrft-r1lite/examples/sarm/outputs/rabc_viz \
+  --num-visualizations 5 \
+  --stride 1
 ```
 
-This should produce `sarm_progress.parquet` next to the local dataset.
+Use `--head-mode dense` when the model was trained with
+`--policy.annotation_mode=dense_only`. Use `--head-mode both` only when you
+want to compare sparse and dense progress curves.
 
-## 4. Relabel Existing ConRFT Demo PKL
+By default, `compute_rabc_weights.py` now writes local files only and does not
+upload to Hugging Face Hub. Add `--push-to-hub` explicitly if you intentionally
+want to upload `sarm_progress.parquet` to the dataset repo.
 
-This step is only needed for ConRFT offline/pretrain. It consumes the progress
-parquet and recomputes rewards plus `mc_returns`.
+This command should produce `sarm_progress.parquet` next to the local dataset.
+If you only need the parquet and do not want visualization images, set
+`--num-visualizations 0`. If the parquet already exists and you only want to
+regenerate visualizations, add `--visualize-only`.
+
+## 4. Export SARM-Reward ConRFT PKL
+
+For long-horizon tasks whose reward is defined by SARM, the recommended path is:
+
+```text
+LeRobotDataset + sarm_progress.parquet -> ConRFT transition pkl
+```
+
+This avoids needing a hand-written sparse reward before the reward model exists.
+Run this step in the `lerobot` environment because it reads LeRobot parquet/video
+files.
+
+Fast state/action/reward smoke test without images:
 
 ```bash
+source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+conda activate lerobot
+cd /home/robot/VLA-RL/conrft-r1lite
+
+python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py \
+  --source_lerobot_dataset=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --output_pkl=/tmp/r1lite_dual_mango_box_sarm_reward_smoke.pkl \
+  --head_mode=dense \
+  --success_threshold=0.95 \
+  --success_reward=10.0 \
+  --max_episodes=1 \
+  --max_transitions=20
+```
+
+Full visual ConRFT pkl export, before Octo embeddings:
+
+```bash
+source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+conda activate lerobot
+cd /home/robot/VLA-RL/conrft-r1lite
+
+python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py \
+  --source_lerobot_dataset=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --output_pkl=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward_no_octo.pkl \
+  --head_mode=dense \
+  --success_threshold=0.95 \
+  --success_reward=10.0 \
+  --include_images \
+  --image_max_width=320
+```
+
+Then add real Octo embeddings in the `RWRL` environment:
+
+```bash
+source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+conda activate RWRL
+cd /home/robot/VLA-RL/conrft-r1lite
+
+python examples/sarm/add_octo_embeddings_to_conrft_pkl.py \
+  --exp_name=r1lite_dual_mango_box \
+  --input_pkl=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward_no_octo.pkl \
+  --output_pkl=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl
+```
+
+### Optional: Preview Camera Videos From Any PKL
+
+Use this after generating a ConRFT/debug pkl to quickly verify that camera frames
+were written correctly. The script is independent from the RL env and supports
+both trajectory-list pkl files and flat transition-list pkl files. For flat
+transition pkl files, `--trajectory_index` means episode index after grouping by
+`infos["episode_index"]`; if that metadata is missing, episodes are split by
+`dones=True`.
+
+First list image keys:
+
+```bash
+source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+conda activate RWRL
+cd /home/robot/VLA-RL/conrft-r1lite
+
+python examples/visualize_pkl_cameras.py \
+  --input_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
+  --trajectory_index=0 \
+  --list_keys
+```
+
+Export a single camera video:
+
+```bash
+python examples/visualize_pkl_cameras.py \
+  --input_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
+  --trajectory_index=0 \
+  --fps=10 \
+  --image_keys=head
+```
+
+Export a three-camera side-by-side grid:
+
+```bash
+python examples/visualize_pkl_cameras.py \
+  --input_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
+  --trajectory_index=0 \
+  --fps=10 \
+  --image_keys=head,left_wrist,right_wrist \
+  --no_separate
+```
+
+Outputs are written under:
+
+```text
+data/transition/r1lite_dual_mango_box/pkl_video_preview/
+```
+
+Expected log for the SARM pkl should look like:
+
+```text
+layout=flat_transitions trajectories=23 trajectory_index=0 section=observations steps=...
+```
+
+If it says `steps=2`, you are either using an old version of the script or the
+script is reading only one transition's two-frame observation stack instead of a
+full episode.
+
+Notes:
+
+- `--head_mode=dense` matches the current `dense_only` SARM training setup.
+- `--include_images` reads the LeRobot MP4 files and writes image histories into the pkl. This can create a large file; use `--image_max_width` to control size.
+- `--image_max_width=320` means the head camera becomes `180x320`, and wrist cameras become `180x320`. Set `--image_max_width<=0` to keep the original LeRobot video resolution: head `720x1280`, wrists `360x640`.
+- Current LeRobot videos may be AV1. The exporter falls back to PyAV software decoding if OpenCV cannot decode AV1.
+- Do not use placeholder embeddings for real training. `--embedding_mode=zeros --allow_zero_embeddings` exists only as a smoke-test escape hatch; it satisfies current buffer fields but removes Octo conditioning information. The final training pkl should be the output of `add_octo_embeddings_to_conrft_pkl.py`.
+
+Legacy relabel mode is still available when you already have a ConRFT pkl and
+only want to rewrite rewards:
+
+```bash
+cd /home/robot/VLA-RL/conrft-r1lite
+conda activate lerobot
+
 python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py \
   --input_pkl=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_demos.pkl \
   --source_lerobot_dataset=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
   --output_pkl=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
+  --head_mode=dense \
   --success_threshold=0.95 \
   --success_reward=10.0
 ```
@@ -230,36 +376,174 @@ DEMO_PATH=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box
 bash examples/experiments/r1lite_dual_mango_box/run_learner_conrft_pretrain.sh
 ```
 
-## 5. Online Reward Wrapper
+## 5. Online SARM Reward
 
-Start a SARM progress sidecar that exposes:
+Offline pretraining consumes the SARM reward already stored in the ConRFT pkl.
+Online RL is different: the env needs a live progress estimate for every real
+robot step. The online chain is:
+
+```text
+actor obs -> SARM progress sidecar -> progress(next_obs) - progress(prev_obs) -> RL reward
+```
+
+The current env wrapper only talks to an HTTP endpoint. It does not load the
+SARM checkpoint inside the RWRL process. Keep SARM inference in the `lerobot`
+environment and keep robot/RL training in the `RWRL` environment.
+
+### 5.1 Start the SARM progress sidecar
+
+Run this in a separate terminal in the `lerobot` environment:
+
+```bash
+source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+conda activate lerobot
+cd /home/robot/VLA-RL/conrft-r1lite
+export PYTHONPATH=/home/robot/VLA-RL/lerobot/src:$PYTHONPATH
+
+python examples/sarm/sarm_progress_sidecar.py \
+  --reward_model_path=/home/robot/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_20260422_122234/checkpoints/005000/pretrained_model \
+  --host=127.0.0.1 \
+  --port=8010 \
+  --device=cuda \
+  --default_head_mode=dense
+```
+
+Check that the server is alive:
+
+```bash
+curl -s http://127.0.0.1:8010/health
+```
+
+Expected response:
+
+```json
+{"status": "ok"}
+```
+
+The sidecar exposes:
 
 ```text
 POST /predict_progress
 {
-  "image_jpeg_base64": "...",
-  "state": [...],
+  "image_key": "head",
+  "head_mode": "dense",
   "task": "...",
-  "head_mode": "sparse",
-  "image_key": "head"
+  "image_jpeg_base64": "...",
+  "state": [...]
 }
 ```
 
 Expected response:
 
 ```json
-{"progress": 0.73}
+{
+  "progress": 0.73,
+  "head_mode": "dense",
+  "stage_index": 6,
+  "stage_confidence": 0.82
+}
 ```
 
-Then enable the wrapper in `examples/experiments/r1lite_dual_mango_box/config.yaml`:
+Implementation note: online inference only has the current observation, while
+offline SARM progress computation used a temporal video window. The sidecar
+fills the SARM context window by repeating the current frame/state. Treat this
+as an online approximation and validate it in `log_only` mode before using it
+as the actual RL reward.
+
+### 5.2 Enable wrapper in the dual mango-box config
+
+Edit `examples/experiments/r1lite_dual_mango_box/config.yaml`:
 
 ```yaml
 reward_model:
   enabled: true
   log_only: true
   endpoint_url: "http://127.0.0.1:8010"
+  checkpoint_path: "/home/robot/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_20260422_122234/checkpoints/005000/pretrained_model"
+  head_mode: "dense"
+  image_key: "head"
+  success_threshold: 0.95
+  success_reward: 10.0
+  reward_scale: 1.0
+  reward_bias: 0.0
+  reward_clip_low: -1.0
+  reward_clip_high: 1.0
+  timeout: 2.0
 ```
 
-Use `log_only: true` first to verify `info["sarm_progress"]` increases through
-the whole task including robot reset. Switch to `log_only: false` only after the
-progress signal is stable.
+`checkpoint_path` is documentation/bookkeeping for the experiment config. The
+current wrapper uses `endpoint_url`; the actual checkpoint is loaded by the
+sidecar command above.
+
+### 5.3 Run online training in log-only mode first
+
+Start the robot body service as usual, then launch learner / actor from the
+`RWRL` environment:
+
+```bash
+source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+conda activate RWRL
+cd /home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box
+
+export DEMO_PATH=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl
+export CHECKPOINT_PATH=/home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/conrft_sarm
+
+bash run_learner_conrft.sh
+```
+
+In another `RWRL` terminal:
+
+```bash
+cd /home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box
+export CHECKPOINT_PATH=/home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/conrft_sarm
+
+bash run_actor_conrft.sh
+```
+
+With `log_only: true`, the wrapper records SARM diagnostics in `info` but does
+not replace the env reward:
+
+```text
+info["sarm_progress"]
+info["sarm_prev_progress"]
+info["sarm_reward_delta"]
+info["sarm_reward"]
+info["sarm_succeed"]
+info["sarm_log_only"] == True
+```
+
+Use this mode for short real-robot rollouts and verify that
+`sarm_progress` generally increases over the full task, including the reset
+phase. If it is flat, noisy, or jumps to 1.0 too early, do not enable reward
+override yet.
+
+### 5.4 Switch from logging to actual SARM reward
+
+After the progress signal looks reasonable, change only:
+
+```yaml
+reward_model:
+  enabled: true
+  log_only: false
+```
+
+Now the wrapper returns SARM reward to RL:
+
+```text
+delta = clip(progress_next - progress_prev, reward_clip_low, reward_clip_high)
+reward = reward_scale * delta + reward_bias
+if progress_next >= success_threshold:
+    reward += success_reward
+    done = True
+    info["succeed"] = True
+```
+
+For the current dense-only model, keep:
+
+```yaml
+reward_model:
+  head_mode: "dense"
+```
+
+Use `head_mode: "sparse"` only if you trained or want to evaluate the sparse
+head.

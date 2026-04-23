@@ -115,10 +115,27 @@ def _resize_transition_images_to_env(transition, observation_space, image_keys):
     if "observations" not in transition or "next_observations" not in transition:
         return transition
 
-    def _resize_obs_images(obs_dict):
+    def _conform_obs(obs_dict):
         if not isinstance(obs_dict, dict):
             return obs_dict
         updated = copy.deepcopy(obs_dict)
+        if "state" in updated and "state" in observation_space:
+            target_shape = tuple(observation_space["state"].shape)
+            state = np.asarray(updated["state"], dtype=np.float32)
+            if state.shape != target_shape:
+                if state.ndim == 1 and len(target_shape) == 2 and state.shape[0] == target_shape[-1]:
+                    state = np.repeat(state[None, :], target_shape[0], axis=0)
+                elif state.ndim == 2 and len(target_shape) == 2 and state.shape[-1] == target_shape[-1]:
+                    if state.shape[0] < target_shape[0]:
+                        pad = np.repeat(state[:1], target_shape[0] - state.shape[0], axis=0)
+                        state = np.concatenate([pad, state], axis=0)
+                    elif state.shape[0] > target_shape[0]:
+                        state = state[-target_shape[0]:]
+                else:
+                    raise ValueError(
+                        f"Observation state shape {state.shape} does not match env target {target_shape}"
+                    )
+            updated["state"] = state.astype(np.float32)
         for image_key in image_keys:
             if image_key not in updated:
                 continue
@@ -139,8 +156,8 @@ def _resize_transition_images_to_env(transition, observation_space, image_keys):
         return updated
 
     transition = copy.deepcopy(transition)
-    transition["observations"] = _resize_obs_images(transition["observations"])
-    transition["next_observations"] = _resize_obs_images(transition["next_observations"])
+    transition["observations"] = _conform_obs(transition["observations"])
+    transition["next_observations"] = _conform_obs(transition["next_observations"])
     return transition
 
 
@@ -692,6 +709,8 @@ def main(_):
                         )
                         if 'infos' in transition and 'grasp_penalty' in transition['infos']:
                             transition['grasp_penalty'] = transition['infos']['grasp_penalty']
+                        elif include_grasp_penalty and 'grasp_penalty' not in transition:
+                            transition['grasp_penalty'] = 0.0
                         demo_buffer.insert(transition)
             print_green(f"demo buffer size: {len(demo_buffer)}")
             print_green(f"online buffer size: {len(replay_buffer)}")
