@@ -239,6 +239,21 @@ This avoids needing a hand-written sparse reward before the reward model exists.
 Run this step in the `lerobot` environment because it reads LeRobot parquet/video
 files.
 
+The exported ConRFT pkl uses the same action semantics as
+`DualR1LiteEnv.step()`:
+
+- EEF translation action is normalized by `--xyz_scale` and later multiplied by
+  `control.xyz_scale` in the env.
+- EEF rotation action is normalized by `--rot_scale` and later multiplied by
+  `control.rot_scale` in the env.
+- Gripper action is the recorded next absolute gripper target normalized to
+  `[-1, 1]`, not a gripper delta.
+
+Pass the experiment `config.yaml` so these scales stay aligned with the env.
+The script only reads YAML values; it does not import the experiment Python
+config or create the RL env. Explicit `--xyz_scale`, `--rot_scale`, and
+`--gripper_max` still override YAML values when needed.
+
 Fast state/action/reward smoke test without images:
 
 ```bash
@@ -248,6 +263,7 @@ cd /home/robot/VLA-RL/conrft-r1lite
 
 python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py \
   --source_lerobot_dataset=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --config_yaml=/home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/config.yaml \
   --output_pkl=/tmp/r1lite_dual_mango_box_sarm_reward_smoke.pkl \
   --head_mode=dense \
   --success_threshold=0.95 \
@@ -265,6 +281,7 @@ cd /home/robot/VLA-RL/conrft-r1lite
 
 python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py \
   --source_lerobot_dataset=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --config_yaml=/home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/config.yaml \
   --output_pkl=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward_no_octo.pkl \
   --head_mode=dense \
   --success_threshold=0.95 \

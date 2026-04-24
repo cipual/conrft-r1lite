@@ -5,10 +5,16 @@ import csv
 import copy
 import pickle as pkl
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import yaml
+
+
+LEFT_GRIPPER_STATE_INDEX = 25
+RIGHT_GRIPPER_STATE_INDEX = 51
+_ARG_DEFAULT = object()
 
 
 def _split_trajectories(transitions: List[Dict]) -> List[List[Dict]]:
@@ -156,6 +162,37 @@ def _parse_image_key_map(value: str) -> Dict[str, str]:
     if not mapping:
         raise ValueError("--image_key_map cannot be empty when --include_images is used")
     return mapping
+
+
+def _load_yaml_config(path: Optional[str]) -> Dict[str, Any]:
+    if not path:
+        return {}
+    config_path = Path(path).expanduser().resolve()
+    if not config_path.exists():
+        raise FileNotFoundError(f"--config_yaml does not exist: {config_path}")
+    with config_path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"--config_yaml must contain a mapping at top level: {config_path}")
+    return data
+
+
+def _nested_config_value(config: Dict[str, Any], path: str, default: Any = None) -> Any:
+    current: Any = config
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+    return current
+
+
+def _resolve_float_arg(value: Any, config: Dict[str, Any], path: str, default: float) -> float:
+    if value is not _ARG_DEFAULT:
+        return float(value)
+    config_value = _nested_config_value(config, path, None)
+    if config_value is not None:
+        return float(config_value)
+    return float(default)
 
 
 class _VideoFrameReader:
@@ -342,6 +379,59 @@ def _transition_reward(
     return float(reward), done, succeed, dense_reward
 
 
+def _normalized_gripper_target(state: np.ndarray, index: int, gripper_max: float) -> float:
+    if gripper_max <= 0:
+        raise ValueError(f"--gripper_max must be positive, got {gripper_max}")
+    if state.size <= index:
+        raise ValueError(f"State has {state.size} dim(s), cannot read gripper index {index}")
+    return float(state[index] / (0.5 * gripper_max) - 1.0)
+
+
+def _action_for_conrft_env(
+    raw_lerobot_action: np.ndarray,
+    next_state: np.ndarray,
+    action_space: str,
+    xyz_scale: float,
+    rot_scale: float,
+    gripper_max: float,
+    clip_action: bool,
+) -> np.ndarray:
+    """Convert LeRobot physical action labels into the action expected by the RL env.
+
+    LeRobot SARM export stores physical actions:
+    - eef: [left dx/dy/dz meters, left rotvec radians, left gripper delta,
+            right dx/dy/dz meters, right rotvec radians, right gripper delta]
+
+    DualR1LiteEnv expects normalized action:
+    - eef: [delta_xyz / xyz_scale, delta_rot / rot_scale, gripper_target_norm]
+
+    The gripper command in the env is an absolute target, not a delta, so it is
+    reconstructed from the recorded next observation.
+    """
+    raw = np.asarray(raw_lerobot_action, dtype=np.float32).reshape(-1)
+    next_state = np.asarray(next_state, dtype=np.float32).reshape(-1)
+    if action_space != "eef":
+        raise ValueError(
+            f"Direct ConRFT export currently supports --action_space=eef only, got {action_space!r}. "
+            "The current dual-arm env executes EEF normalized actions."
+        )
+    if raw.size != 14:
+        raise ValueError(f"Expected 14-D LeRobot EEF action, got shape {raw.shape}")
+    if xyz_scale <= 0 or rot_scale <= 0:
+        raise ValueError(f"--xyz_scale and --rot_scale must be positive, got {xyz_scale}, {rot_scale}")
+
+    action = np.zeros((14,), dtype=np.float32)
+    action[0:3] = raw[0:3] / float(xyz_scale)
+    action[3:6] = raw[3:6] / float(rot_scale)
+    action[6] = _normalized_gripper_target(next_state, LEFT_GRIPPER_STATE_INDEX, gripper_max)
+    action[7:10] = raw[7:10] / float(xyz_scale)
+    action[10:13] = raw[10:13] / float(rot_scale)
+    action[13] = _normalized_gripper_target(next_state, RIGHT_GRIPPER_STATE_INDEX, gripper_max)
+    if clip_action:
+        action = np.clip(action, -1.0, 1.0)
+    return action.astype(np.float32)
+
+
 def _relabel_trajectory(
     trajectory: List[Dict],
     progress: List[float],
@@ -414,6 +504,11 @@ def _build_conrft_from_lerobot(
     image_key_map: Dict[str, str],
     image_max_width: int,
     embedding_mode: str,
+    action_space: str,
+    xyz_scale: float,
+    rot_scale: float,
+    gripper_max: float,
+    clip_action: bool,
     max_episodes: Optional[int],
     max_transitions: Optional[int],
 ) -> List[Dict]:
@@ -469,7 +564,15 @@ def _build_conrft_from_lerobot(
                         episode_start_index=episode_start_index,
                         obs_horizon=obs_horizon,
                     ),
-                    "actions": np.asarray(current["action"], dtype=np.float32),
+                    "actions": _action_for_conrft_env(
+                        raw_lerobot_action=np.asarray(current["action"], dtype=np.float32),
+                        next_state=np.asarray(nxt["observation.state"], dtype=np.float32),
+                        action_space=action_space,
+                        xyz_scale=xyz_scale,
+                        rot_scale=rot_scale,
+                        gripper_max=gripper_max,
+                        clip_action=clip_action,
+                    ),
                     "next_observations": _build_observation(
                         nxt,
                         episode_df,
@@ -492,6 +595,11 @@ def _build_conrft_from_lerobot(
                         "frame_index": int(current["frame_index"]),
                         "next_frame_index": int(nxt["frame_index"]),
                         "conversion_source": "lerobot_sarm_progress",
+                        "action_type": "env_normalized_eef_delta_and_absolute_gripper_target",
+                        "xyz_scale": float(xyz_scale),
+                        "rot_scale": float(rot_scale),
+                        "gripper_max": float(gripper_max),
+                        "clip_action": bool(clip_action),
                     },
                     "grasp_penalty": np.float32(0.0),
                 }
@@ -571,6 +679,53 @@ def main():
         action="store_true",
         help="Required with --embedding_mode=zeros to acknowledge that zero embeddings are placeholders, not real Octo features.",
     )
+    parser.add_argument(
+        "--config_yaml",
+        default=None,
+        help=(
+            "Optional experiment config.yaml. Only action-scale fields are read: "
+            "control.xyz_scale, control.rot_scale, and gripper.max_value/gripper.open_value. "
+            "Explicit CLI scale arguments override YAML values."
+        ),
+    )
+    parser.add_argument(
+        "--action_space",
+        choices=("eef",),
+        default="eef",
+        help="Direct LeRobot export: output normalized actions for this RL env action space.",
+    )
+    parser.add_argument(
+        "--xyz_scale",
+        type=float,
+        default=_ARG_DEFAULT,
+        help=(
+            "Direct LeRobot export: EEF translation normalization scale used by DualR1LiteEnv. "
+            "Default comes from --config_yaml control.xyz_scale, then 0.03."
+        ),
+    )
+    parser.add_argument(
+        "--rot_scale",
+        type=float,
+        default=_ARG_DEFAULT,
+        help=(
+            "Direct LeRobot export: EEF rotation normalization scale used by DualR1LiteEnv. "
+            "Default comes from --config_yaml control.rot_scale, then 0.20."
+        ),
+    )
+    parser.add_argument(
+        "--gripper_max",
+        type=float,
+        default=_ARG_DEFAULT,
+        help=(
+            "Direct LeRobot export: physical gripper max corresponding to normalized action +1. "
+            "Default comes from --config_yaml gripper.max_value, then gripper.open_value, then 100.0."
+        ),
+    )
+    parser.add_argument(
+        "--no_clip_action",
+        action="store_true",
+        help="Direct LeRobot export: do not clip normalized action labels to [-1, 1].",
+    )
     parser.add_argument("--max_episodes", type=int, default=None, help="Debug: export at most this many episodes.")
     parser.add_argument("--max_transitions", type=int, default=None, help="Debug: export at most this many transitions.")
     args = parser.parse_args()
@@ -579,6 +734,20 @@ def main():
             "--embedding_mode=zeros writes placeholder embeddings that satisfy current buffer fields but remove "
             "Octo conditioning information. Pass --allow_zero_embeddings only for smoke tests, or generate real "
             "Octo embeddings before using the pkl for training."
+        )
+
+    yaml_config = _load_yaml_config(args.config_yaml)
+    xyz_scale = _resolve_float_arg(args.xyz_scale, yaml_config, "control.xyz_scale", 0.03)
+    rot_scale = _resolve_float_arg(args.rot_scale, yaml_config, "control.rot_scale", 0.20)
+    if args.gripper_max is not _ARG_DEFAULT:
+        gripper_max = float(args.gripper_max)
+    else:
+        gripper_max = float(
+            _nested_config_value(
+                yaml_config,
+                "gripper.max_value",
+                _nested_config_value(yaml_config, "gripper.open_value", 100.0),
+            )
         )
 
     progress_by_episode = _load_progress(_progress_path(args.source_lerobot_dataset, args.progress_parquet), args.head_mode)
@@ -628,6 +797,11 @@ def main():
             image_key_map=_parse_image_key_map(args.image_key_map),
             image_max_width=args.image_max_width,
             embedding_mode=args.embedding_mode,
+            action_space=args.action_space,
+            xyz_scale=xyz_scale,
+            rot_scale=rot_scale,
+            gripper_max=gripper_max,
+            clip_action=not args.no_clip_action,
             max_episodes=args.max_episodes,
             max_transitions=args.max_transitions,
         )
