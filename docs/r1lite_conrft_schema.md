@@ -66,10 +66,14 @@ So for official-teleop conversion, `tcp_force` / `tcp_torque` should currently
 be treated as unavailable unless a different bag confirms non-empty wrench
 topics or another state source is added.
 
-For ConRFT, the default proprio subset is:
+For ConRFT, the canonical flattened proprio ABI is `gym_sorted`.
+`SERLObsWrapper` sorts `proprio_keys` before flattening; conversion scripts must
+write offline PKLs in the same order.
+
+For single-arm tasks, the default canonical proprio subset is:
 
 ```python
-["tcp_pose", "tcp_vel", "tcp_force", "tcp_torque", "gripper_pose"]
+["gripper_pose", "tcp_force", "tcp_pose", "tcp_torque", "tcp_vel"]
 ```
 
 After `SERLObsWrapper` and `ChunkingWrapper(obs_horizon=2)`, training consumes:
@@ -81,6 +85,18 @@ After `SERLObsWrapper` and `ChunkingWrapper(obs_horizon=2)`, training consumes:
     "image_wrist": uint8[2, 128, 128, 3],
 }
 ```
+
+For the dual mango task, the canonical flattened order is:
+
+```python
+[
+    "left/gripper_pose", "left/joint_pos", "left/joint_vel", "left/tcp_pose", "left/tcp_vel",
+    "right/gripper_pose", "right/joint_pos", "right/joint_vel", "right/tcp_pose", "right/tcp_vel",
+    "torso_pos",
+]
+```
+
+Do not mix older config-order dual mango PKLs with the current online env.
 
 ## Action schema
 

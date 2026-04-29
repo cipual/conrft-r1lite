@@ -234,7 +234,7 @@ Minimal flow:
 
 ```bash
 cd examples/experiments/r1lite_reach_target
-export DEMO_PATH=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/<demo_file>.pkl
+export DEMO_PATH=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/<demo_file>.pkl
 bash run_learner_conrft_pretrain.sh
 bash run_learner_conrft.sh
 bash run_actor_conrft.sh

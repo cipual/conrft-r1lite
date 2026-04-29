@@ -19,10 +19,10 @@ Run LeRobot export, annotation, SARM training, and progress computation in the
 `lerobot` conda environment:
 
 ```bash
-source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+source /home/ps/Applications/miniforge3/etc/profile.d/conda.sh
 conda activate lerobot
-cd /home/robot/VLA-RL/conrft-r1lite
-export HF_LEROBOT_HOME=/home/robot/VLA-RL/conrft-r1lite/data/lerobot
+cd /home/ps/VLA-RL/conrft-r1lite
+export HF_LEROBOT_HOME=/home/ps/VLA-RL/conrft-r1lite/data/lerobot
 ```
 
 The manual annotation UI writes LeRobot episode parquet metadata directly, so
@@ -49,33 +49,33 @@ for browser-based manual annotation. If a dataset was exported with AV1 and the
 browser video stays stuck at `0s`, re-export it with `--overwrite --vcodec=h264`.
 
 ```bash
-cd /home/robot/VLA-RL/conrft-r1lite
+cd /home/ps/VLA-RL/conrft-r1lite
 
 python examples/sarm/export_rosbag_to_lerobot_sarm.py \
-  --input_dirs=/home/robot/VLA-RL/conrft-r1lite/data/RAW/r1lite_dual_mango_box \
+  --input_dirs=/home/ps/VLA-RL/conrft-r1lite/data/RAW/r1lite_dual_mango_box \
   --task_name=r1lite_dual_mango_box \
   --task_desc="左臂抓住白色的框放在右臂的周围，右臂抓住发红的芒果，把它放入框内，然后左右机械臂复位。" \
   --fps=10 \
   --action_space=eef \
   --output_repo_id=r1lite_dual_mango_box \
-  --output_dir=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --output_dir=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
   --overwrite
 ```
 ```bash
-export HF_LEROBOT_HOME=/home/robot/VLA-RL/conrft-r1lite/data/lerobot
+export HF_LEROBOT_HOME=/home/ps/VLA-RL/conrft-r1lite/data/lerobot
 ```
 
 You can also pass a parent directory and export every `*_RAW` episode inside it:
 
 ```bash
 python examples/sarm/export_rosbag_to_lerobot_sarm.py \
-  --input_dirs=/home/robot/VLA-RL/conrft-r1lite/data/RAW/r1lite_dual_mango_box \
+  --input_dirs=/home/ps/VLA-RL/conrft-r1lite/data/RAW/r1lite_dual_mango_box \
   --task_name=r1lite_dual_mango_box \
   --task_desc="左臂抓住白色的框放在右臂的周围，右臂抓住发红的芒果，把它放入框内，然后左右机械臂复位。" \
   --fps=10 \
   --action_space=eef \
   --output_repo_id=r1lite_dual_mango_box \
-  --output_dir=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --output_dir=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
   --overwrite
 ```
 
@@ -83,7 +83,7 @@ If the RAW directories are nested deeper, add `--recursive`. The default scan
 pattern is `--raw_dir_glob='*_RAW'`.
 
 `--output_repo_id` is the LeRobot dataset id. With
-`HF_LEROBOT_HOME=/home/robot/VLA-RL/conrft-r1lite/data/lerobot` and
+`HF_LEROBOT_HOME=/home/ps/VLA-RL/conrft-r1lite/data/lerobot` and
 `--output_repo_id=r1lite_dual_mango_box`, LeRobot-compatible tools will look under
 `data/lerobot/r1lite_dual_mango_box`. `--output_dir` controls the actual local
 directory written on disk and should match that path for this local layout. If
@@ -98,11 +98,11 @@ For a dependency-light sanity check that does not require LeRobot:
 
 ```bash
 python examples/sarm/export_rosbag_to_lerobot_sarm.py \
-  --input_dirs=/home/robot/VLA-RL/conrft-r1lite/data/RAW/r1lite_reach_target/RB251106041_20260409152555451_RAW \
+  --input_dirs=/home/ps/VLA-RL/conrft-r1lite/data/RAW/r1lite_reach_target/RB251106041_20260409152555451_RAW \
   --fps=10 \
   --action_space=eef \
   --output_repo_id=r1lite_reach_target \
-  --output_dir=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_reach_target_dryrun \
+  --output_dir=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_reach_target_dryrun \
   --dry_run_manifest=/tmp/r1lite_sarm_export_manifest.json
 ```
 
@@ -111,7 +111,7 @@ python examples/sarm/export_rosbag_to_lerobot_sarm.py \
 Run from the LeRobot repository:
 
 ```bash
-cd /home/robot/VLA-RL/lerobot
+cd /home/ps/VLA-RL/lerobot
 
 python src/lerobot/data_processing/sarm_annotations/subtask_annotation.py \
   --repo-id r1lite_dual_mango_box \
@@ -142,10 +142,10 @@ Saving writes:
 ```
 
 ```bash
-cd /home/robot/VLA-RL/conrft-r1lite
+cd /home/ps/VLA-RL/conrft-r1lite
 
 python examples/sarm/manual_annotate_sarm.py \
-  --dataset_root=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --dataset_root=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
   --video_key=observation.images.head \
   --port=8020
 ```
@@ -157,8 +157,8 @@ To continue editing an existing annotation file:
 
 ```bash
 python examples/sarm/manual_annotate_sarm.py \
-  --dataset_root=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
-  --annotations_file=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box/meta/sarm_manual_annotations.json \
+  --dataset_root=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --annotations_file=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box/meta/sarm_manual_annotations.json \
   --video_key=observation.images.head \
   --port=8020
 ```
@@ -167,7 +167,7 @@ For sidecar preparation/checking without starting the browser server:
 
 ```bash
 python examples/sarm/manual_annotate_sarm.py \
-  --dataset_root=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --dataset_root=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
   --video_key=observation.images.head \
   --prepare_only
 ```
@@ -179,7 +179,7 @@ if you intentionally do not want that safety net.
 ## 3. Train SARM
 
 ```bash
-export HF_LEROBOT_HOME=/home/robot/VLA-RL/conrft-r1lite/data/lerobot
+export HF_LEROBOT_HOME=/home/ps/VLA-RL/conrft-r1lite/data/lerobot
 
 lerobot-train \
   --dataset.repo_id=r1lite_dual_mango_box \
@@ -189,7 +189,7 @@ lerobot-train \
   --policy.state_key=observation.state \
   --policy.frame_gap=10 \
   --policy.push_to_hub=false \
-  --output_dir=/home/robot/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_$(date +%Y%m%d_%H%M%S) \
+  --output_dir=/home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_$(date +%Y%m%d_%H%M%S) \
   --batch_size=4 \
   --steps=5000 \
   --num_workers=6 \
@@ -200,16 +200,16 @@ lerobot-train \
 Compute progress values:
 
 ```bash
-cd /home/robot/VLA-RL/lerobot
-export HF_LEROBOT_HOME=/home/robot/VLA-RL/conrft-r1lite/data/lerobot
-export PYTHONPATH=/home/robot/VLA-RL/lerobot/src
+cd /home/ps/VLA-RL/lerobot
+export HF_LEROBOT_HOME=/home/ps/VLA-RL/conrft-r1lite/data/lerobot
+export PYTHONPATH=/home/ps/VLA-RL/lerobot/src
 
 python -m lerobot.policies.sarm.compute_rabc_weights \
   --dataset-repo-id r1lite_dual_mango_box \
-  --reward-model-path /home/robot/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_20260422_122234/checkpoints/005000/pretrained_model \
+  --reward-model-path /home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_20260422_122234/checkpoints/005000/pretrained_model \
   --head-mode dense \
-  --output-path /home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box/sarm_progress.parquet \
-  --output-dir /home/robot/VLA-RL/conrft-r1lite/examples/sarm/outputs/rabc_viz \
+  --output-path /home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box/sarm_progress.parquet \
+  --output-dir /home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/rabc_viz \
   --num-visualizations 5 \
   --stride 1
 ```
@@ -244,10 +244,27 @@ The exported ConRFT pkl uses the same action semantics as
 
 - EEF translation action is normalized by `--xyz_scale` and later multiplied by
   `control.xyz_scale` in the env.
-- EEF rotation action is normalized by `--rot_scale` and later multiplied by
-  `control.rot_scale` in the env.
+- EEF rotation action is `euler_left` XYZ delta, normalized by `--rot_scale`,
+  and later multiplied by `control.rot_scale` in the env. The env applies it as
+  `Rotation.from_euler("xyz", delta) * current_rotation`.
 - Gripper action is the recorded next absolute gripper target normalized to
   `[-1, 1]`, not a gripper delta.
+
+The exported ConRFT pkl uses canonical `gym_sorted` flattened state layout.
+This must match `SERLObsWrapper` online observations exactly. For the dual mango
+task the order is:
+
+```text
+left/gripper_pose, left/joint_pos, left/joint_vel, left/tcp_pose, left/tcp_vel,
+right/gripper_pose, right/joint_pos, right/joint_vel, right/tcp_pose, right/tcp_vel,
+torso_pos
+```
+
+Old mango PKLs generated before this convention may be config-order files. Do
+not train from them; regenerate from LeRobot/SARM progress.
+Old SARM/LeRobot-derived PKLs generated with `rotvec_right` rotation actions
+are also incompatible with the current env default. Regenerate them before
+offline replay or training.
 
 Pass the experiment `config.yaml` so these scales stay aligned with the env.
 The script only reads YAML values; it does not import the experiment Python
@@ -257,13 +274,13 @@ config or create the RL env. Explicit `--xyz_scale`, `--rot_scale`, and
 Fast state/action/reward smoke test without images:
 
 ```bash
-source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+source /home/ps/Applications/miniforge3/etc/profile.d/conda.sh
 conda activate lerobot
-cd /home/robot/VLA-RL/conrft-r1lite
+cd /home/ps/VLA-RL/conrft-r1lite
 
 python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py \
-  --source_lerobot_dataset=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
-  --config_yaml=/home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/config.yaml \
+  --source_lerobot_dataset=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --config_yaml=/home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/config.yaml \
   --output_pkl=/tmp/r1lite_dual_mango_box_sarm_reward_smoke.pkl \
   --head_mode=dense \
   --success_threshold=0.95 \
@@ -275,14 +292,14 @@ python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py \
 Full visual ConRFT pkl export, before Octo embeddings:
 
 ```bash
-source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+source /home/ps/Applications/miniforge3/etc/profile.d/conda.sh
 conda activate lerobot
-cd /home/robot/VLA-RL/conrft-r1lite
+cd /home/ps/VLA-RL/conrft-r1lite
 
 python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py \
-  --source_lerobot_dataset=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
-  --config_yaml=/home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/config.yaml \
-  --output_pkl=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward_no_octo.pkl \
+  --source_lerobot_dataset=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --config_yaml=/home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/config.yaml \
+  --output_pkl=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward_no_octo.pkl \
   --head_mode=dense \
   --success_threshold=0.95 \
   --success_reward=10.0 \
@@ -293,15 +310,60 @@ python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py \
 Then add real Octo embeddings in the `RWRL` environment:
 
 ```bash
-source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+source /home/ps/Applications/miniforge3/etc/profile.d/conda.sh
 conda activate RWRL
-cd /home/robot/VLA-RL/conrft-r1lite
+cd /home/ps/VLA-RL/conrft-r1lite
 
 python examples/sarm/add_octo_embeddings_to_conrft_pkl.py \
   --exp_name=r1lite_dual_mango_box \
-  --input_pkl=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward_no_octo.pkl \
-  --output_pkl=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl
+  --input_pkl=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward_no_octo.pkl \
+  --output_pkl=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl
 ```
+
+If this command segfaults while adding the first trajectory, first run a small
+GPU diagnostic:
+
+```bash
+python examples/sarm/add_octo_embeddings_to_conrft_pkl.py \
+  --exp_name=r1lite_dual_mango_box \
+  --input_pkl=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward_no_octo.pkl \
+  --output_pkl=/tmp/r1lite_dual_mango_box_octo_gpu_smoke_50.pkl \
+  --max_trajectories=1 \
+  --max_transitions_per_trajectory=50 \
+  --jax_platform=gpu \
+  --xla_mem_fraction=0.25
+```
+
+Then test the full first trajectory:
+
+```bash
+python examples/sarm/add_octo_embeddings_to_conrft_pkl.py \
+  --exp_name=r1lite_dual_mango_box \
+  --input_pkl=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward_no_octo.pkl \
+  --output_pkl=/tmp/r1lite_dual_mango_box_octo_gpu_smoke_traj1.pkl \
+  --max_trajectories=1 \
+  --jax_platform=gpu \
+  --xla_mem_fraction=0.25
+```
+
+Partial files are only for debugging. For the final training pkl, rerun without
+`--max_trajectories` or `--max_transitions_per_trajectory`.
+
+The embedding script sets conservative XLA/TF defaults before importing
+JAX/Octo:
+
+```text
+XLA_PYTHON_CLIENT_PREALLOCATE=false
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.35
+TF_FORCE_GPU_ALLOW_GROWTH=true
+```
+
+For GPU runs, the script imports TensorFlow first and disables TensorFlow GPU
+visibility with `tf.config.set_visible_devices([], "GPU")`, matching Octo's own
+training scripts. This leaves CUDA ownership to JAX and prevents the observed
+native segfault. `--jax_platform=cpu` also sets `JAX_PLATFORMS=cpu`, which is
+needed by the current JAX package to skip CUDA backend initialization
+completely.
 
 ### Optional: Preview Camera Videos From Any PKL
 
@@ -315,12 +377,12 @@ transition pkl files, `--trajectory_index` means episode index after grouping by
 First list image keys:
 
 ```bash
-source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+source /home/ps/Applications/miniforge3/etc/profile.d/conda.sh
 conda activate RWRL
-cd /home/robot/VLA-RL/conrft-r1lite
+cd /home/ps/VLA-RL/conrft-r1lite
 
 python examples/visualize_pkl_cameras.py \
-  --input_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
+  --input_file=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
   --trajectory_index=0 \
   --list_keys
 ```
@@ -329,7 +391,7 @@ Export a single camera video:
 
 ```bash
 python examples/visualize_pkl_cameras.py \
-  --input_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
+  --input_file=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
   --trajectory_index=0 \
   --fps=10 \
   --image_keys=head
@@ -339,7 +401,7 @@ Export a three-camera side-by-side grid:
 
 ```bash
 python examples/visualize_pkl_cameras.py \
-  --input_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
+  --input_file=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
   --trajectory_index=0 \
   --fps=10 \
   --image_keys=head,left_wrist,right_wrist \
@@ -368,19 +430,20 @@ Notes:
 - `--include_images` reads the LeRobot MP4 files and writes image histories into the pkl. This can create a large file; use `--image_max_width` to control size.
 - `--image_max_width=320` means the head camera becomes `180x320`, and wrist cameras become `180x320`. Set `--image_max_width<=0` to keep the original LeRobot video resolution: head `720x1280`, wrists `360x640`.
 - Current LeRobot videos may be AV1. The exporter falls back to PyAV software decoding if OpenCV cannot decode AV1.
+- `infos["state_layout"]` should be `gym_sorted`.
 - Do not use placeholder embeddings for real training. `--embedding_mode=zeros --allow_zero_embeddings` exists only as a smoke-test escape hatch; it satisfies current buffer fields but removes Octo conditioning information. The final training pkl should be the output of `add_octo_embeddings_to_conrft_pkl.py`.
 
 Legacy relabel mode is still available when you already have a ConRFT pkl and
 only want to rewrite rewards:
 
 ```bash
-cd /home/robot/VLA-RL/conrft-r1lite
+cd /home/ps/VLA-RL/conrft-r1lite
 conda activate lerobot
 
 python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py \
-  --input_pkl=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_demos.pkl \
-  --source_lerobot_dataset=/home/robot/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
-  --output_pkl=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
+  --input_pkl=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_demos.pkl \
+  --source_lerobot_dataset=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --output_pkl=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
   --head_mode=dense \
   --success_threshold=0.95 \
   --success_reward=10.0
@@ -389,7 +452,7 @@ python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py \
 Then train as usual:
 
 ```bash
-DEMO_PATH=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
+DEMO_PATH=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
 bash examples/experiments/r1lite_dual_mango_box/run_learner_conrft_pretrain.sh
 ```
 
@@ -412,13 +475,13 @@ environment and keep robot/RL training in the `RWRL` environment.
 Run this in a separate terminal in the `lerobot` environment:
 
 ```bash
-source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+source /home/ps/Applications/miniforge3/etc/profile.d/conda.sh
 conda activate lerobot
-cd /home/robot/VLA-RL/conrft-r1lite
-export PYTHONPATH=/home/robot/VLA-RL/lerobot/src:$PYTHONPATH
+cd /home/ps/VLA-RL/conrft-r1lite
+export PYTHONPATH=/home/ps/VLA-RL/lerobot/src:$PYTHONPATH
 
 python examples/sarm/sarm_progress_sidecar.py \
-  --reward_model_path=/home/robot/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_20260422_122234/checkpoints/005000/pretrained_model \
+  --reward_model_path=/home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_20260422_122234/checkpoints/005000/pretrained_model \
   --host=127.0.0.1 \
   --port=8010 \
   --device=cuda \
@@ -476,7 +539,7 @@ reward_model:
   enabled: true
   log_only: true
   endpoint_url: "http://127.0.0.1:8010"
-  checkpoint_path: "/home/robot/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_20260422_122234/checkpoints/005000/pretrained_model"
+  checkpoint_path: "/home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_20260422_122234/checkpoints/005000/pretrained_model"
   head_mode: "dense"
   image_key: "head"
   success_threshold: 0.95
@@ -498,12 +561,12 @@ Start the robot body service as usual, then launch learner / actor from the
 `RWRL` environment:
 
 ```bash
-source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+source /home/ps/Applications/miniforge3/etc/profile.d/conda.sh
 conda activate RWRL
-cd /home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box
+cd /home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box
 
-export DEMO_PATH=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl
-export CHECKPOINT_PATH=/home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/conrft_sarm
+export DEMO_PATH=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl
+export CHECKPOINT_PATH=/home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/conrft_sarm
 
 bash run_learner_conrft.sh
 ```
@@ -511,8 +574,8 @@ bash run_learner_conrft.sh
 In another `RWRL` terminal:
 
 ```bash
-cd /home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box
-export CHECKPOINT_PATH=/home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/conrft_sarm
+cd /home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box
+export CHECKPOINT_PATH=/home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/conrft_sarm
 
 bash run_actor_conrft.sh
 ```

@@ -14,7 +14,7 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-$(cfg_value xla_mem_fraction_actor)}
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/matplotlib}"
 
-python ../../train_conrft_octo.py "$@" \
+python "${REPO_ROOT}/examples/train_conrft_octo.py" "$@" \
     --exp_name=r1lite_dual_mango_box \
     --checkpoint_path="${CHECKPOINT_PATH}" \
     --actor

@@ -12,12 +12,27 @@ from scipy.spatial.transform import Rotation
 from r1lite_env.client import R1LiteClient, decode_image_base64
 
 
+ARM_NUMERIC_STATE_KEYS = (
+    "tcp_pose",
+    "tcp_vel",
+    "tcp_force",
+    "tcp_torque",
+    "gripper_pose",
+    "joint_pos",
+    "joint_vel",
+    "joint_effort",
+)
+TORSO_JOINT_DIM = 3
+
+
 @dataclass
 class R1LiteEnvConfig:
     SERVER_URL: str = "http://127.0.0.1:8001/"
     ACTION_SCALE: np.ndarray = field(default_factory=lambda: np.array([0.03, 0.20, 1.0], dtype=np.float32))
     CONTROL_HZ: float = 10.0
     LOG_EFFECTIVE_HZ: bool = False
+    ACTION_ROTATION_MODE: str = "euler_left"
+    ACTION_REFERENCE_POSE: str = "commanded"
     DISPLAY_IMAGE: bool = False
     MAX_EPISODE_LENGTH: int = 100
     DEFAULT_MODE: str = "ee_pose_servo"
@@ -113,6 +128,36 @@ class _BaseR1LiteEnv(gym.Env):
             decoded[key] = image
         return decoded
 
+    @staticmethod
+    def _extract_arm_numeric_state(arm_state: Dict) -> Dict[str, np.ndarray]:
+        values = {
+            key: np.asarray(arm_state[key], dtype=np.float32)
+            for key in ARM_NUMERIC_STATE_KEYS
+        }
+        values["tcp_pose"] = _BaseR1LiteEnv._canonical_tcp_pose(values["tcp_pose"])
+        return values
+
+    @staticmethod
+    def _canonical_tcp_pose(tcp_pose: np.ndarray) -> np.ndarray:
+        pose = np.asarray(tcp_pose, dtype=np.float32).copy()
+        if pose.shape[0] >= 7 and pose[6] < 0:
+            pose[3:7] *= -1.0
+        return pose
+
+    @staticmethod
+    def _extract_torso_numeric_state(torso_state: Optional[Dict]) -> np.ndarray:
+        if not isinstance(torso_state, dict):
+            return np.zeros((TORSO_JOINT_DIM * 3,), dtype=np.float32)
+
+        values = []
+        for key in ("joint_pos", "joint_vel", "joint_effort"):
+            value = np.asarray(torso_state.get(key, np.zeros((TORSO_JOINT_DIM,), dtype=np.float32)), dtype=np.float32)
+            value = value.reshape(-1)
+            if value.size < TORSO_JOINT_DIM:
+                value = np.pad(value, (0, TORSO_JOINT_DIM - value.size))
+            values.append(value[:TORSO_JOINT_DIM])
+        return np.concatenate(values, axis=0).astype(np.float32)
+
     def _maybe_set_fixed_gripper_open(self, arm: str):
         if not bool(self.config.FIX_GRIPPER_OPEN):
             return
@@ -130,11 +175,35 @@ class _BaseR1LiteEnv(gym.Env):
     def _target_pose_from_action(self, tcp_pose: np.ndarray, action: np.ndarray) -> np.ndarray:
         pose = tcp_pose.copy()
         pose[:3] = pose[:3] + action[:3] * float(self.config.ACTION_SCALE[0])
-        pose[3:] = (
-            Rotation.from_euler("xyz", action[3:6] * float(self.config.ACTION_SCALE[1]))
-            * Rotation.from_quat(tcp_pose[3:])
-        ).as_quat()
+        delta = action[3:6] * float(self.config.ACTION_SCALE[1])
+        current_rot = Rotation.from_quat(tcp_pose[3:])
+        rotation_mode = str(getattr(self.config, "ACTION_ROTATION_MODE", "euler_left"))
+        if rotation_mode == "rotvec_right":
+            pose[3:] = (current_rot * Rotation.from_rotvec(delta)).as_quat()
+        elif rotation_mode == "euler_left":
+            pose[3:] = (Rotation.from_euler("xyz", delta) * current_rot).as_quat()
+        else:
+            raise ValueError(
+                f"Unsupported ACTION_ROTATION_MODE={rotation_mode!r}; "
+                "expected 'euler_left' or 'rotvec_right'"
+            )
         return pose
+
+    def _reference_pose_for_action(self, arm: str, raw: Dict) -> np.ndarray:
+        reference_mode = str(getattr(self.config, "ACTION_REFERENCE_POSE", "commanded"))
+        if reference_mode == "current":
+            return self._canonical_tcp_pose(raw["state"][arm]["tcp_pose"])
+        if reference_mode == "commanded":
+            commanded = self.commanded_pose if not isinstance(self.commanded_pose, dict) else self.commanded_pose.get(arm)
+            return (
+                commanded.copy()
+                if commanded is not None
+                else self._canonical_tcp_pose(raw["state"][arm]["tcp_pose"])
+            )
+        raise ValueError(
+            f"Unsupported ACTION_REFERENCE_POSE={reference_mode!r}; "
+            "expected 'current' or 'commanded'"
+        )
 
     def _quat_angle_error_rad(self, current_xyzw: np.ndarray, target_xyzw: np.ndarray) -> float:
         current = Rotation.from_quat(current_xyzw)
@@ -184,6 +253,17 @@ class _BaseR1LiteEnv(gym.Env):
         clipped[3:] = Rotation.from_euler("xyz", euler).as_quat().astype(np.float32)
         return clipped
 
+    def _warn_if_pose_clipped(self, arm: str, target_pose: np.ndarray, clipped_pose: np.ndarray):
+        pos_clip = float(np.linalg.norm(clipped_pose[:3] - target_pose[:3]))
+        ori_clip = self._quat_angle_error_rad(target_pose[3:], clipped_pose[3:])
+        if pos_clip > 0.01 or ori_clip > 0.05:
+            print(
+                f"[action-clip:{arm}] safety box changed target "
+                f"pos_clip={pos_clip:.4f}m ori_clip={ori_clip:.4f}rad "
+                f"target_xyz={np.array2string(target_pose[:3], precision=4, suppress_small=True)} "
+                f"clipped_xyz={np.array2string(clipped_pose[:3], precision=4, suppress_small=True)}"
+            )
+
     def _wait_until_reset_ready(self, arm: str, target_pose: Optional[np.ndarray], target_joint: Optional[np.ndarray]) -> Dict:
         deadline = time.time() + max(0.0, float(self.config.RESET_WAIT_TIMEOUT_SEC))
         prev_pose = None
@@ -205,7 +285,7 @@ class _BaseR1LiteEnv(gym.Env):
             poll_index += 1
             latest_raw = self.client.get_state()
             arm_state = latest_raw["state"][arm]
-            current_pose = np.asarray(arm_state["tcp_pose"], dtype=np.float32)
+            current_pose = self._canonical_tcp_pose(arm_state["tcp_pose"])
             current_joint = np.asarray(arm_state["joint_pos"], dtype=np.float32)
 
             reached = True
@@ -328,16 +408,7 @@ class R1LiteArmEnv(_BaseR1LiteEnv):
     def _extract_obs(self, raw: Dict) -> Dict:
         arm_state = raw["state"][self.arm]
         return {
-            "state": {
-                "tcp_pose": np.asarray(arm_state["tcp_pose"], dtype=np.float32),
-                "tcp_vel": np.asarray(arm_state["tcp_vel"], dtype=np.float32),
-                "tcp_force": np.asarray(arm_state["tcp_force"], dtype=np.float32),
-                "tcp_torque": np.asarray(arm_state["tcp_torque"], dtype=np.float32),
-                "gripper_pose": np.asarray(arm_state["gripper_pose"], dtype=np.float32),
-                "joint_pos": np.asarray(arm_state["joint_pos"], dtype=np.float32),
-                "joint_vel": np.asarray(arm_state["joint_vel"], dtype=np.float32),
-                "joint_effort": np.asarray(arm_state["joint_effort"], dtype=np.float32),
-            },
+            "state": self._extract_arm_numeric_state(arm_state),
             "images": self._decode_images(raw["images"], self.config.ARM_IMAGE_KEYS[self.arm]),
         }
 
@@ -365,7 +436,7 @@ class R1LiteArmEnv(_BaseR1LiteEnv):
         obs = self._extract_obs(raw)
         # reset 后把“最后一次已发送目标”同步到当前末端位姿。
         # 之后零动作会保持这个目标，而不是每步追着 noisy tcp_pose 跑。
-        self.commanded_pose = np.asarray(raw["state"][self.arm]["tcp_pose"], dtype=np.float32).copy()
+        self.commanded_pose = self._canonical_tcp_pose(raw["state"][self.arm]["tcp_pose"])
         self.last_obs = obs
         return obs, {"succeed": False}
 
@@ -373,7 +444,7 @@ class R1LiteArmEnv(_BaseR1LiteEnv):
         start_time = time.time()
         action = np.clip(np.asarray(action, dtype=np.float32), self.action_space.low, self.action_space.high)
         raw = self.client.get_state()
-        tcp_pose = np.asarray(raw["state"][self.arm]["tcp_pose"], dtype=np.float32)
+        tcp_pose = self._canonical_tcp_pose(raw["state"][self.arm]["tcp_pose"])
         # 对齐独立 teleop 的手感：有明确人工输入时，用当前观测 tcp_pose 做参考；
         # 只有零输入保持时，才继续沿用 commanded_pose 来 hold 住目标。
         if float(np.linalg.norm(action[:6])) > 1e-6:
@@ -401,7 +472,13 @@ class R1LiteArmEnv(_BaseR1LiteEnv):
         self.curr_path_length += 1
         done = self.curr_path_length >= self.max_episode_length
         self.last_obs = obs
-        return obs, 0.0, done, False, {"succeed": False}
+        next_pose = self._canonical_tcp_pose(next_raw["state"][self.arm]["tcp_pose"])
+        return obs, 0.0, done, False, {
+            "succeed": False,
+            "debug_reference_pose": reference_pose,
+            "debug_target_pose": pose_target,
+            "debug_next_pose": next_pose,
+        }
 
 
 class DualR1LiteEnv(_BaseR1LiteEnv):
@@ -468,16 +545,9 @@ class DualR1LiteEnv(_BaseR1LiteEnv):
     def _extract_obs(self, raw: Dict) -> Dict:
         return {
             "state": {
-                "left": {key: np.asarray(value, dtype=np.float32) for key, value in raw["state"]["left"].items()},
-                "right": {key: np.asarray(value, dtype=np.float32) for key, value in raw["state"]["right"].items()},
-                "torso": np.concatenate(
-                    [
-                        np.asarray(raw["state"]["torso"]["joint_pos"], dtype=np.float32),
-                        np.asarray(raw["state"]["torso"]["joint_vel"], dtype=np.float32),
-                        np.asarray(raw["state"]["torso"]["joint_effort"], dtype=np.float32),
-                    ],
-                    axis=0,
-                ),
+                "left": self._extract_arm_numeric_state(raw["state"]["left"]),
+                "right": self._extract_arm_numeric_state(raw["state"]["right"]),
+                "torso": self._extract_torso_numeric_state(raw["state"].get("torso")),
             },
             "images": self._decode_images(raw["images"], self.config.IMAGE_KEYS),
             "meta": copy.deepcopy(raw["meta"]),
@@ -486,19 +556,40 @@ class DualR1LiteEnv(_BaseR1LiteEnv):
     def reset(self, **kwargs):
         self.curr_path_length = 0
         self.commanded_pose = {"left": None, "right": None}
+        left_reset_pose = self._sample_reset_pose("left")
+        right_reset_pose = self._sample_reset_pose("right")
+        left_reset_joint = (
+            np.asarray(self.config.RESET_LEFT_JOINT[:6], dtype=np.float32)
+            if left_reset_pose is None
+            else None
+        )
+        right_reset_joint = (
+            np.asarray(self.config.RESET_RIGHT_JOINT[:6], dtype=np.float32)
+            if right_reset_pose is None
+            else None
+        )
         self.client.reset(
-            left_pose=self._sample_reset_pose("left"),
-            right_pose=self._sample_reset_pose("right"),
+            left_pose=left_reset_pose,
+            right_pose=right_reset_pose,
             torso=self.config.RESET_TORSO,
         )
         if bool(self.config.FIX_GRIPPER_OPEN):
             self._maybe_set_fixed_gripper_open("left")
             self._maybe_set_fixed_gripper_open("right")
         time.sleep(max(0.0, float(self.config.RESET_SETTLE_SEC)))
-        raw = self.client.get_state()
+        self._wait_until_reset_ready(
+            "left",
+            None if left_reset_pose is None else np.asarray(left_reset_pose, dtype=np.float32),
+            left_reset_joint,
+        )
+        raw = self._wait_until_reset_ready(
+            "right",
+            None if right_reset_pose is None else np.asarray(right_reset_pose, dtype=np.float32),
+            right_reset_joint,
+        )
         obs = self._extract_obs(raw)
-        self.commanded_pose["left"] = np.asarray(raw["state"]["left"]["tcp_pose"], dtype=np.float32).copy()
-        self.commanded_pose["right"] = np.asarray(raw["state"]["right"]["tcp_pose"], dtype=np.float32).copy()
+        self.commanded_pose["left"] = self._canonical_tcp_pose(raw["state"]["left"]["tcp_pose"])
+        self.commanded_pose["right"] = self._canonical_tcp_pose(raw["state"]["right"]["tcp_pose"])
         self.last_obs = obs
         return obs, {"succeed": False}
 
@@ -508,24 +599,14 @@ class DualR1LiteEnv(_BaseR1LiteEnv):
         raw = self.client.get_state()
         left_action = action[:7]
         right_action = action[7:]
-        left_reference_pose = (
-            self.commanded_pose["left"].copy()
-            if self.commanded_pose["left"] is not None
-            else np.asarray(raw["state"]["left"]["tcp_pose"], dtype=np.float32).copy()
-        )
-        right_reference_pose = (
-            self.commanded_pose["right"].copy()
-            if self.commanded_pose["right"] is not None
-            else np.asarray(raw["state"]["right"]["tcp_pose"], dtype=np.float32).copy()
-        )
-        left_pose = self._clip_pose_to_safety_box(
-            "left",
-            self._target_pose_from_action(left_reference_pose, left_action[:6]),
-        )
-        right_pose = self._clip_pose_to_safety_box(
-            "right",
-            self._target_pose_from_action(right_reference_pose, right_action[:6]),
-        )
+        left_reference_pose = self._reference_pose_for_action("left", raw)
+        right_reference_pose = self._reference_pose_for_action("right", raw)
+        left_target_pose = self._target_pose_from_action(left_reference_pose, left_action[:6])
+        right_target_pose = self._target_pose_from_action(right_reference_pose, right_action[:6])
+        left_pose = self._clip_pose_to_safety_box("left", left_target_pose)
+        right_pose = self._clip_pose_to_safety_box("right", right_target_pose)
+        self._warn_if_pose_clipped("left", left_target_pose, left_pose)
+        self._warn_if_pose_clipped("right", right_target_pose, right_pose)
         left_payload = {
             "pose_target": left_pose.tolist(),
             "preset": self.config.DEFAULT_PRESET,
@@ -552,4 +633,14 @@ class DualR1LiteEnv(_BaseR1LiteEnv):
         self.curr_path_length += 1
         done = self.curr_path_length >= self.max_episode_length
         self.last_obs = obs
-        return obs, 0.0, done, False, {"succeed": False}
+        return obs, 0.0, done, False, {
+            "succeed": False,
+            "debug_left_reference_pose": left_reference_pose,
+            "debug_right_reference_pose": right_reference_pose,
+            "debug_left_target_pose": left_pose,
+            "debug_right_target_pose": right_pose,
+            "debug_left_unclipped_target_pose": left_target_pose,
+            "debug_right_unclipped_target_pose": right_target_pose,
+            "debug_left_next_pose": self._canonical_tcp_pose(next_raw["state"]["left"]["tcp_pose"]),
+            "debug_right_next_pose": self._canonical_tcp_pose(next_raw["state"]["right"]["tcp_pose"]),
+        }

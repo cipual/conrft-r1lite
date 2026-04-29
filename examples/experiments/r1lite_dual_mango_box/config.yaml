@@ -24,11 +24,11 @@ env:
   reset_right_joint: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   reset_left_joint: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   abs_pose_limit_low:
-    left: [0.22, -0.42, 0.18, -3.141592653589793, -3.141592653589793, -3.141592653589793]
-    right: [-0.10, -0.85, 0.27, -3.141592653589793, -3.141592653589793, -3.141592653589793]
+    left: [0.00, -0.20, 0.18, -3.141592653589793, -3.141592653589793, -3.141592653589793]
+    right: [0.00, -0.62, 0.20, -3.141592653589793, -3.141592653589793, -3.141592653589793]
   abs_pose_limit_high:
-    left: [0.55, -0.05, 0.45, 3.141592653589793, 3.141592653589793, 3.141592653589793]
-    right: [0.60, -0.19, 0.70, 3.141592653589793, 3.141592653589793, 3.141592653589793]
+    left: [0.55, 0.55, 1.00, 3.141592653589793, 3.141592653589793, 3.141592653589793]
+    right: [0.62, 0.05, 1.00, 3.141592653589793, 3.141592653589793, 3.141592653589793]
 
 control:
   hz: 10.0
@@ -47,10 +47,10 @@ offline_training:
   batch_size: 256
   replay_buffer_capacity: 200000
   cta_ratio: 2
-  discount: 0.98
+  discount: 0.95
   checkpoint_period: 2000
   buffer_period: 1000
-  checkpoint_path: "./conrft"
+  checkpoint_path: "./conrft_sarm"
   demo_path: "./demo_data/replace_me.pkl"
   pretrain_steps: 20000
   debug: false
@@ -64,14 +64,14 @@ offline_training:
     xla_mem_fraction: 0.5
 
 online_training:
-  checkpoint_path: "./conrft"
-  demo_path: "./demo_data/replace_me.pkl"
+  checkpoint_path: "./conrft_sarm"
+  demo_path: "/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward_fixed.pkl"
   pretrain_steps: 20000
   debug: false
   batch_size: 8
   replay_buffer_capacity: 200000
   cta_ratio: 2
-  discount: 0.98
+  discount: 0.95
   checkpoint_period: 2000
   buffer_period: 1000
   training_starts: 100
@@ -95,11 +95,10 @@ task:
 reward_model:
   # SARM online reward is off by default. Enable after training a LeRobot SARM
   # model and starting a sidecar progress server.
-  enabled: false
+  enabled: true
   log_only: true
-  endpoint_url: null
-  checkpoint_path: null
-  head_mode: "sparse"
+  endpoint_url: "http://127.0.0.1:8010"
+  head_mode: "dense"
   image_key: "head"
   success_threshold: 0.95
   success_reward: 10.0

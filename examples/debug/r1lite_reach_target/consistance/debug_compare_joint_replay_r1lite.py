@@ -348,15 +348,15 @@ def main():
     parser.add_argument("--mode", default="ee_pose_servo", choices=("ee_pose_servo", "mit_joint_compliance"))
     parser.add_argument(
         "--output_image_3d",
-        default="/home/robot/VLA-RL/conrft-r1lite/examples/debug/r1lite_reach_target/consistance/r1lite_debug_joint_replay_compare_3d.png",
+        default="/home/ps/VLA-RL/conrft-r1lite/examples/debug/r1lite_reach_target/consistance/r1lite_debug_joint_replay_compare_3d.png",
     )
     parser.add_argument(
         "--output_csv",
-        default="/home/robot/VLA-RL/conrft-r1lite/examples/debug/r1lite_reach_target/consistance/r1lite_debug_joint_replay_compare_errors.csv",
+        default="/home/ps/VLA-RL/conrft-r1lite/examples/debug/r1lite_reach_target/consistance/r1lite_debug_joint_replay_compare_errors.csv",
     )
     parser.add_argument(
         "--output_npz",
-        default="/home/robot/VLA-RL/conrft-r1lite/examples/debug/r1lite_reach_target/consistance/r1lite_debug_joint_replay_compare.npz",
+        default="/home/ps/VLA-RL/conrft-r1lite/examples/debug/r1lite_reach_target/consistance/r1lite_debug_joint_replay_compare.npz",
     )
     args = parser.parse_args()
 

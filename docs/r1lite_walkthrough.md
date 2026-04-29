@@ -1,513 +1,569 @@
-# Training On R1Lite Walkthrough
+# R1Lite ConRFT Walkthrough
 
-This walkthrough mirrors the official Franka pipeline, but uses the current
-R1Lite HTTP service, single-arm reach-target scaffold, and SpaceMouse
-intervention tooling in `conrft-r1lite`.
+This document describes two supported data-to-training paths for R1Lite.
 
-## Scope
+- Path A: collect demonstrations inside the Gym environment with SpaceMouse,
+  optionally replay the saved transitions, then run offline and online ConRFT.
+- Path B: collect official leader-follower / SARM data, convert it to
+  LeRobot, train a SARM reward model, relabel/export ConRFT data, optionally
+  replay the transitions, then run offline and online ConRFT.
 
-The current end-to-end path is built around
-`examples/experiments/r1lite_reach_target`.
+The Chinese version is [r1lite_walkthrough_zh.md](./r1lite_walkthrough_zh.md).
 
-- task: single-arm reach target
-- reward: geometric reward from end-effector pose error
-- teleoperation: SpaceMouse through `R1LiteTeleopInterventionWrapper`
-- control owner during HIL: `policy`
-- direct teleop owner: `teleop` with `teleop_source="spacemouse"`
+## Common Setup
 
-## 0. Activate The Environment
-
-Use the `RWRL` conda environment before running any of the scripts below:
+Use `RWRL` for ConRFT, Octo embeddings, replay, robot envs, and actor/learner
+training:
 
 ```bash
-source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+source /home/ps/Applications/miniforge3/etc/profile.d/conda.sh
 conda activate RWRL
-```
-
-The provided `run_*.sh` scripts export the required `PYTHONPATH` and a writable
-`MPLCONFIGDIR` automatically.
-
-Set the robot service address before demo collection or training:
-
-```bash
+cd /home/ps/VLA-RL/conrft-r1lite
 export ROBOT=http://192.168.12.12:8001
 ```
 
-## 1. Start The Robot Service
-
-On the robot machine, start the R1Lite body service and verify that:
-
-- `GET /state` returns valid arm state and images
-- `GET /health` reports the expected `active_mode`
-- `POST /action` works for `owner="policy"`
-
-The inference-side quick checks are documented in [README.md](../README.md).
-
-## 2. Configure The Experiment
-
-Review [config.yaml](../examples/experiments/r1lite_reach_target/config.yaml) first.
-The Python file [config.py](../examples/experiments/r1lite_reach_target/config.py)
-now mainly contains loading logic and wrapper wiring.
-
-Key values to confirm:
-
-- `SERVER_URL`
-- `DEFAULT_MODE`
-- `DEFAULT_PRESET`
-- `RESET_LEFT_POSE` / `RESET_RIGHT_POSE`
-- `reset_left_joint` / `reset_right_joint`
-- `env.reset_settle_sec`
-- reset completion thresholds under `env.reset_*`
-- `RANDOM_RESET`, `RANDOM_XY_RANGE`, `RANDOM_RZ_RANGE`
-- `ABS_POSE_LIMIT_LOW` / `ABS_POSE_LIMIT_HIGH`
-- `TrainConfig.arm`
-- `TrainConfig.image_keys`
-- `train.setup_mode`
-- `TrainConfig.task_desc`
-- `TrainConfig.octo_path`
-- `offline_training.batch_size`
-- `offline_training.pretrain_steps`
-- `offline_training.pretrain.q_weight` / `offline_training.pretrain.bc_weight`
-- `offline_training.learner.q_weight` / `offline_training.learner.bc_weight`
-- `offline_training.pretrain.xla_mem_fraction`
-- `task.target_left_pose` / `task.target_right_pose`
-- `task.position_tolerance_m` / `task.orientation_tolerance_rad`
-- `task.success_reward` and dense reward weights
-- `teleop.calibrate_seconds`, `teleop.trans_deadzone`, `teleop.rot_deadzone`
-- `teleop.activate_threshold` / `teleop.release_threshold`
-- `gripper.fixed_open` / `gripper.open_value`
-- `control.hz` / `control.xyz_scale` / `control.rot_scale`
-- `control.debug_effective_hz`
-
-Default control mode is `ee_pose_servo`, which is the recommended mode for the
-first end-to-end run because SpaceMouse commands are expressed as end-effector
-pose deltas.
-
-About `SERVER_URL`:
-
-- `r1lite_reach_target` now reads `SERVER_URL` from the `ROBOT` environment
-  variable first
-- if `ROBOT` is unset, it falls back to `http://127.0.0.1:8001/`
-- otherwise the default comes from `config.yaml`
-
-About `octo_path`:
-
-- the default value now follows the Octo repo recommendation:
-  `hf://rail-berkeley/octo-small-1.5`
-- `OctoModel.load_pretrained(...)` will download and cache the checkpoint under
-  the current user automatically
-- if you already have a local checkpoint, override it with:
+Use `lerobot` for LeRobot dataset export, SARM annotation/training, and SARM
+progress computation:
 
 ```bash
-export OCTO_PATH=/path/to/your/octo_checkpoint
+source /home/ps/Applications/miniforge3/etc/profile.d/conda.sh
+conda activate lerobot
+cd /home/ps/VLA-RL/conrft-r1lite
+export HF_LEROBOT_HOME=/home/ps/VLA-RL/conrft-r1lite/data/lerobot
 ```
 
-- if you want to pre-download the model manually, the upstream Octo examples and
-  README use the same Hugging Face identifier:
-  `hf://rail-berkeley/octo-small-1.5`
+The R1Lite body service must be running before online env collection, online
+replay, actor rollout, or online training. The experiment configs read
+`ROBOT` first, then fall back to `env.server_url` in `config.yaml`.
 
-Advanced note:
+## Shared Conventions
 
-- if you want to use a different experiment config file entirely, set:
+The canonical flattened proprio layout is `gym_sorted`. Offline PKLs and online
+env observations must match this order.
 
-```bash
-export R1LITE_REACH_CONFIG=/path/to/your/config.yaml
+For dual-arm tasks:
+
+```text
+left/gripper_pose, left/joint_pos, left/joint_vel, left/tcp_pose, left/tcp_vel,
+right/gripper_pose, right/joint_pos, right/joint_vel, right/tcp_pose, right/tcp_vel,
+torso_pos
 ```
 
-## 3. Verify SpaceMouse Teleop
+R1Lite EEF action semantics are:
 
-Before recording demos, verify direct teleoperation:
+- translation: normalized delta, multiplied by `control.xyz_scale`
+- rotation: normalized `euler_left` XYZ delta, multiplied by `control.rot_scale`
+- gripper: normalized absolute next gripper target in `[-1, 1]`
 
-```bash
-export R1LITE_REACH_CONFIG=/home/robot/VLA-RL/conrft-r1lite/examples/experiments/r1lite_reach_target/config.yaml
-cd serl_robot_infra
-python -m r1lite_env.spacemouse_teleop --server-url "$ROBOT" --arm right
+The env applies rotation as:
+
+```python
+Rotation.from_euler("xyz", delta) * current_rotation
 ```
 
-Recommended checks:
+Existing SARM/LeRobot-derived PKLs generated with older `rotvec_right` action
+labels should be regenerated before replay or training.
 
-- robot responds smoothly to 6DoF input
-- if `gripper.fixed_open=true`, the reach task keeps the gripper open and ignores SpaceMouse gripper buttons during demo recording
-- `GET /health` shows `command_owner=teleop`
-- `GET /health` shows `active_teleop_source=spacemouse`
+## Path A: Gym + SpaceMouse Demonstrations
 
-If this fails, fix teleop first. Demo recording and HIL training both depend on
-the same SpaceMouse path.
+Use this path for tasks that can be rewarded directly by the Gym env. The
+reference example is `r1lite_reach_target`.
 
-## 4. Record Demonstrations
+### A1. Configure The Task
 
-R1Lite demos are collected directly from the env, not from rosbag conversion.
-The dedicated script is:
+Main files:
+
+- [config.yaml](../examples/experiments/r1lite_reach_target/config.yaml)
+- [config.py](../examples/experiments/r1lite_reach_target/config.py)
+- [wrapper.py](../examples/experiments/r1lite_reach_target/wrapper.py)
+
+Important config groups:
+
+| Group | Meaning | Typical values |
+| --- | --- | --- |
+| `env.server_url` | robot service URL, overridden by `ROBOT` | `http://192.168.12.12:8001/` |
+| `env.max_episode_length` | max rollout length | positive int, often `1000` |
+| `env.default_mode` | body-service control mode | `ee_pose_servo` |
+| `env.reset_*` | reset pose/joint and reset tolerances | task-specific |
+| `env.abs_pose_limit_low/high` | action target safety box | meters + radians |
+| `control.hz` | env control frequency | positive float, often `10.0` |
+| `control.xyz_scale` | meters per normalized xyz action unit | positive float, often `0.03` |
+| `control.rot_scale` | radians per normalized rotation action unit | positive float, often `0.20` |
+| `train.arm` | active arm | `left`, `right`, or `dual`; reach target uses `right` |
+| `train.image_keys` | image observations used by Octo | reach target uses `image_primary,image_wrist` |
+| `train.octo_path` | Octo checkpoint | `hf://rail-berkeley/octo-small-1.5` |
+| `task.*` | reward and success definition | target pose, tolerances, reward weights |
+| `teleop.*` | SpaceMouse calibration/deadzone | non-negative floats |
+| `gripper.fixed_open` | keep gripper open and ignore gripper actions | `true` for reach target |
+
+### A2. Collect Demonstrations
+
+Run from the experiment directory:
 
 ```bash
-cd examples/experiments/r1lite_reach_target
-bash run_record_demos_octo.sh
-```
-
-If you want to force a specific local checkpoint for this step:
-
-```bash
-cd examples/experiments/r1lite_reach_target
-export OCTO_PATH=/path/to/your/octo_checkpoint
+cd /home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_reach_target
+export SUCCESS_COUNT=20
+export OUTPUT_DIR=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target
 bash run_record_demos_octo.sh
 ```
 
 Equivalent direct command:
 
 ```bash
-cd examples
+cd /home/ps/VLA-RL/conrft-r1lite/examples
 python record_demos_r1lite_octo.py \
-    --exp_name=r1lite_reach_target \
-    --successes_needed=20
+  --exp_name=r1lite_reach_target \
+  --successes_needed=20 \
+  --output_dir=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target
 ```
 
-What the script does:
+`run_record_demos_octo.sh` parameters:
 
-- creates the real R1Lite env
-- enables `R1LiteTeleopInterventionWrapper`
-- rolls out zero policy actions and records `info["intervene_action"]` when the
-  operator takes over
-- keeps only successful trajectories
-- adds `mc_returns`
-- adds Octo `embeddings`
-- adds `next_embeddings`
-- writes a ConRFT-ready `.pkl` file to
-  `data/transition/r1lite_reach_target`
+| Name | Type / range | Meaning |
+| --- | --- | --- |
+| `SUCCESS_COUNT` | positive int | number of successful trajectories to keep |
+| `OUTPUT_DIR` | path | output directory for ConRFT `.pkl` demos |
+| extra CLI args | forwarded | appended to `record_demos_r1lite_octo.py` |
 
-Official teleop conversion path:
+`record_demos_r1lite_octo.py` entry parameters:
 
-- if you collect data with the Galaxea official teleop pipeline first, use the
-  official-teleop conversion script instead of `run_record_demos_octo.sh`
-- the current script reads the task config, inspects bag metadata, resolves the
-  required topics, and builds the target RL timeline from `control.hz`
-- the current implementation uses `rosbags` for stage-1 conversion and writes a
-  task-aligned transition `.pkl` with original image resolution
-- `--dry_run` is still useful for checking topic mapping before doing the full
-  conversion
+| Argument | Type / range | Meaning |
+| --- | --- | --- |
+| `--exp_name` | experiment name in `examples/experiments` | selects config and env wrapper |
+| `--successes_needed` | positive int | stop after this many successful demos |
+| `--reward_scale` | float | multiplier used when computing `mc_returns` |
+| `--reward_bias` | float | additive reward bias for `mc_returns` |
+| `--output_dir` | path or omitted | defaults to `examples/experiments/<exp_name>/demo_data` |
+| `--reset_wait_sec` | non-negative float seconds | wait after reset before the next rollout |
 
-Example:
+Output is a ConRFT transition PKL with observations, actions, rewards, dones,
+`mc_returns`, Octo `embeddings`, and `next_embeddings`.
 
-```bash
-cd /home/robot/VLA-RL/conrft-r1lite/examples
-python convert_official_teleop_to_conrft_demo.py \
-    --exp_name=r1lite_reach_target \
-    --input_dir=/home/robot/VLA-RL/conrft-r1lite/data/RAW/r1lite_reach_target/RB251106041_20260409152555451_RAW \
-    --dry_run \
-    --output_file=/tmp/r1lite_official_teleop_plan.json
-```
+### A3. Optional Replay Validation
 
-What this command currently does:
+Use replay after generating a PKL and before training.
 
-- loads `examples/experiments/r1lite_reach_target/config.yaml`
-- checks that the required topics exist for the configured arm and `image_keys`
-- chooses the topic mapping for `image_primary`, `image_wrist`, proprioception,
-  and teleop targets
-- builds a uniform timeline using `control.hz`
-- writes a JSON plan to `--output_file`
-
-Once the conversion environment is installed, the full conversion command is:
+List trajectories:
 
 ```bash
-cd /home/robot/VLA-RL/conrft-r1lite/examples
-python convert_official_teleop_to_conrft_demo.py \
-    --exp_name=r1lite_reach_target \
-    --input_dir=/home/robot/VLA-RL/conrft-r1lite/data/RAW/r1lite_reach_target/RB251106041_20260409152555451_RAW \
-    --output_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/r1lite_reach_target_official_teleop_stage1.pkl
-```
-
-What the full conversion currently produces:
-
-- `observations`
-- `actions`
-- `next_observations`
-- `rewards`
-- `masks`
-- `dones`
-- `mc_returns`
-
-Reward and done alignment:
-
-- the offline official-teleop conversion uses the same task semantics as the
-  online demo path in `record_demos_r1lite_octo.py`
-- for `r1lite_reach_target`, reward / success / done are recomputed from the
-  converted `tcp_pose` sequence using the same target pose and thresholds as
-  [wrapper.py](../examples/experiments/r1lite_reach_target/wrapper.py)
-- `mc_returns` are added with the same helper used by online demo recording
-
-If you want a final training `.pkl` with Octo embeddings in one command, add
-`--with_embeddings`:
-
-```bash
-cd /home/robot/VLA-RL/conrft-r1lite/examples
-python convert_official_teleop_to_conrft_demo.py \
-    --exp_name=r1lite_reach_target \
-    --input_dir=/home/robot/VLA-RL/conrft-r1lite/data/RAW/r1lite_reach_target/RB251106041_20260409152555451_RAW \
-    --output_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/r1lite_reach_target_official_teleop_final.pkl \
-    --with_embeddings
-```
-
-With `--with_embeddings`, the converted output also includes:
-
-- `embeddings`
-- `next_embeddings`
-
-The dry-run output is useful to verify:
-
-- which camera topics will map to `image_primary` and `image_wrist`
-- whether the task is treated as left-arm, right-arm, or dual-arm
-- which action reconstruction strategy will be used
-- how many RL steps the bag will produce after resampling
-
-For the current sample bag under `data/RAW/r1lite_reach_target`, the recommended dry-run command is:
-
-```bash
-cd /home/robot/VLA-RL/conrft-r1lite/examples
-python convert_official_teleop_to_conrft_demo.py \
-    --exp_name=r1lite_reach_target \
-    --input_dir=/home/robot/VLA-RL/conrft-r1lite/data/RAW/r1lite_reach_target/RB251106041_20260409152555451_RAW \
-    --dry_run \
-    --output_file=/tmp/official_teleop_plan.json
-```
-
-The full conversion design is documented in
-[official_teleop_to_conrft_conversion.md](./official_teleop_to_conrft_conversion.md).
-
-Replaying a saved transition trajectory:
-
-- if you want to replay one saved transition trajectory on the robot, use the
-  replay helper below
-- it resets before replay by default, replays one trajectory split by `done`,
-  and resets again after replay finishes
-
-First inspect how many trajectories are inside the `.pkl`:
-
-```bash
-cd /home/robot/VLA-RL/conrft-r1lite/examples
+cd /home/ps/VLA-RL/conrft-r1lite/examples
 python replay_transition_r1lite.py \
-    --exp_name=r1lite_reach_target \
-    --input_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/r1lite_reach_target_official_teleop_final.pkl \
-    --list_only
+  --exp_name=r1lite_reach_target \
+  --input_file=/path/to/reach_target_demos.pkl \
+  --list_only
 ```
 
-Then replay one trajectory, for example trajectory `0`:
+Offline action replay should reconstruct recorded next TCP poses with near-zero
+error:
 
 ```bash
-cd /home/robot/VLA-RL/conrft-r1lite/examples
 python replay_transition_r1lite.py \
-    --exp_name=r1lite_reach_target \
-    --input_file=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/r1lite_reach_target_official_teleop_final.pkl \
-    --trajectory_index=0
+  --exp_name=r1lite_reach_target \
+  --input_file=/path/to/reach_target_demos.pkl \
+  --trajectory_index=0 \
+  --exec_mode=offline \
+  --replay_mode=action \
+  --output_csv=/tmp/reach_replay_errors.csv \
+  --output_summary_json=/tmp/reach_replay_summary.json
 ```
 
-Useful options:
+Replay script parameters:
 
-- `--no_reset_before`
-- `--no_reset_after`
-- `--reset_wait_sec=1.0`
-- `--log_every=10`
-- `--replay_mode pose_target`
-- `--replay_mode action`
+| Argument | Type / choices | Meaning |
+| --- | --- | --- |
+| `--exp_name` | experiment name | selects env config and action semantics |
+| `--input_file` | `.pkl` path | transition file to inspect or replay |
+| `--trajectory_index` | int >= 0 | trajectory after splitting by `dones` |
+| `--all_trajectories` | flag | offline only, process every trajectory |
+| `--list_only` | flag | print trajectory summary and exit |
+| `--exec_mode` | `offline`, `online` | compute only, or command the robot |
+| `--replay_mode` | `action`, `state` | integrate actions, or send recorded state targets |
+| `--offline_reference` | `teacher_forced`, `rollout` | use recorded current state each step, or integrated target |
+| `--start_step` | int >= 0 | first step to replay |
+| `--max_steps` | positive int or omitted | cap number of replayed steps |
+| `--no_reset_before` | flag | online only, skip reset before replay |
+| `--no_reset_after` | flag | online only, skip reset after replay |
+| `--reset_wait_sec` | non-negative float | wait after reset |
+| `--log_every` | positive int | print every N steps |
+| `--output_csv` | path or omitted | per-step error table |
+| `--output_npz` | path or omitted | numeric arrays |
+| `--output_summary_json` | path or omitted | summary statistics |
 
-During replay, the script prints the position/orientation error between:
+### A4. Offline Training
 
-- the robot's actual current TCP pose
-- the saved `next_observations["state"][-1, :7]` TCP pose from the transition
-
-This makes it easier to judge how closely the replay follows the original
-recorded trajectory.
-
-## 5. Stage I: Cal-ConRFT Pretrain
-
-Set `DEMO_PATH` to the demo file recorded in the previous step:
+Run learner-only pretraining:
 
 ```bash
-cd examples/experiments/r1lite_reach_target
-export DEMO_PATH=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/r1lite_reach_target_20_demos_<timestamp>.pkl
+cd /home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_reach_target
+export DEMO_PATH=/path/to/reach_target_demos.pkl
+export CHECKPOINT_PATH=/home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_reach_target/conrft
 bash run_learner_conrft_pretrain.sh
 ```
 
-This stage is learner-only. It uses the demonstration buffer to calibrate the
-policy before online exploration.
+`run_learner_conrft_pretrain.sh` reads defaults from
+`offline_training` in `config.yaml`.
 
-Default script behavior:
+| Env var / flag | Type / range | Meaning |
+| --- | --- | --- |
+| `DEMO_PATH` / `--demo_path` | path, repeatable in direct CLI | offline demo PKL |
+| `CHECKPOINT_PATH` / `--checkpoint_path` | path | checkpoint output directory |
+| `PRETRAIN_STEPS` / `--pretrain_steps` | positive int | number of offline learner updates |
+| `Q_WEIGHT` / `--q_weight` | float >= 0 | actor Q-guidance weight |
+| `BC_WEIGHT` / `--bc_weight` | float >= 0 | behavior cloning weight |
+| `TRAIN_DEBUG` / `--debug` | bool | disables W&B when true |
+| `XLA_PYTHON_CLIENT_MEM_FRACTION` | float in `(0, 1]` | JAX memory fraction |
 
-- defaults now come from `offline_training` in
-  [config.yaml](../examples/experiments/r1lite_reach_target/config.yaml)
-- commonly tuned fields are:
-  - `offline_training.batch_size`
-  - `offline_training.pretrain_steps`
-  - `offline_training.pretrain.q_weight`
-  - `offline_training.pretrain.bc_weight`
-  - `offline_training.pretrain.xla_mem_fraction`
+Direct training script flags:
 
-### W&B Curves During Offline Pretrain
+| Argument | Choices / type | Meaning |
+| --- | --- | --- |
+| `--exp_name` | experiment name | selects config |
+| `--learner` | flag | run learner process |
+| `--actor` | flag | run actor process |
+| `--ip` | host/IP | learner address used by actors |
+| `--demo_path` | repeatable path | demo buffers loaded by learner |
+| `--checkpoint_path` | path | load/save checkpoint directory |
+| `--seed` | int | random seed |
+| `--gamma` | float in `[0, 1]` | discount |
+| `--reward_scale`, `--reward_bias`, `--reward_neg` | float | reward transforms |
+| `--eval_checkpoint_step` | int >= 0 | checkpoint step for evaluation mode |
+| `--eval_n_trajs` | positive int | number of eval trajectories |
 
-The offline learner logs `update_info` from
-[conrft_single_octo_cp.py](../serl_launcher/serl_launcher/agents/continuous/conrft_single_octo_cp.py)
-to W&B. The most important curves are:
+### A5. Online Training
 
-- `actor_loss`
-  The total policy loss used to update the actor. It is the weighted sum of
-  behavior cloning loss and Q-guidance loss:
-  `actor_loss = bc_weight * bc_loss + q_weight * (-q_loss)`.
-  This is a mixed objective, so its absolute value is less important than its
-  long-term trend and stability.
+Start learner and actor in separate terminals.
 
-- `bc_loss`
-  The behavior cloning / consistency loss. This tells you how well the policy
-  matches demo actions. In offline pretrain this is usually one of the most
-  important curves. A gradual decrease is generally a good sign.
-
-- `mse`
-  Mean squared error between predicted actions and demo actions. This is the
-  easiest “is the policy imitating the demos” indicator to read. It should
-  usually decrease during successful offline warm-up.
-
-- `q_loss`
-  Logged as the mean Q value of the current policy actions. Because the actor
-  objective uses `-Q`, a larger `q_loss` here usually means the critic thinks
-  the actor’s actions are better. Read it together with `bc_loss`, not alone.
-
-- `q_weight`
-  The current weight of the Q-guidance term in actor training.
-
-- `bc_weight`
-  The current weight of the behavior cloning term in actor training.
-
-- `critic_loss`
-  Total critic loss. In Cal-QL this includes both TD loss and CQL penalty:
-  `critic_loss = td_loss + cql_alpha * cql_loss`.
-  This curve can be noisy; watch for explosions or sustained divergence.
-
-- `td_loss`
-  Temporal-difference regression loss for the critic. This shows how well the
-  critic fits bootstrap targets from offline data.
-
-- `cql_loss`
-  Conservative Q-Learning penalty. It pushes the critic to avoid assigning
-  unrealistically high values to unsupported actions. This is expected to be
-  non-zero in offline training.
-
-- `cql_alpha`
-  Weight applied to the conservative penalty. In the current implementation it
-  is fixed by config, so this curve is mainly useful for confirming the run is
-  using the expected setting.
-
-- `cql_diff`
-  The raw Q-gap used before clipping in the CQL term. Large positive values
-  typically mean the critic is trying to score out-of-distribution actions too
-  highly; very unstable swings here often correlate with critic instability.
-
-- `calql_bound_rate`
-  Fraction of sampled Q values that fall below the Monte Carlo return lower
-  bound used by Cal-QL. This is a Cal-QL-specific diagnostic and is mainly for
-  relative comparison between runs, not for a strict target value.
-
-- `predicted_qs`
-  Mean Q predicted by the critic on the batch actions.
-
-- `target_qs`
-  Mean bootstrap target used to train the critic.
-
-- `rewards`
-  Mean batch reward from demo transitions. In pure offline pretrain on a fixed
-  dataset, this should usually stay roughly stationary. It is a dataset sanity
-  check, not a learning-progress metric.
-
-- `actor_lr`, `critic_lr`
-  Optimizer learning rates. These are useful mainly to confirm schedules or
-  debug unexpected training behavior.
-
-- `timer/*`
-  Average runtime breakdowns logged from the training loop. These help diagnose
-  slow data loading, replay sampling, or update steps, but they are not RL
-  quality metrics.
-
-How to read the curves quickly:
-
-- If `bc_loss` and `mse` go down while `critic_loss` stays bounded, offline
-  pretrain is usually behaving reasonably.
-- If `critic_loss`, `td_loss`, or `cql_diff` suddenly explode, the critic is
-  likely unstable; try smaller `offline_training.batch_size` first.
-- If `bc_loss` barely moves, inspect the demo quality, action scaling, and
-  whether the dataset matches the current observation schema.
-- If W&B shows `rewards` drifting a lot during pure offline pretrain, that is
-  often a sign of dataset mixing or loading problems rather than actual policy
-  improvement.
-
-## 6. Stage II: HIL-ConRFT Online Training
-
-Run both threads:
+Learner:
 
 ```bash
-cd examples/experiments/r1lite_reach_target
-export DEMO_PATH=/home/robot/VLA-RL/conrft-r1lite/data/transition/r1lite_reach_target/r1lite_reach_target_20_demos_<timestamp>.pkl
+cd /home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_reach_target
+export DEMO_PATH=/path/to/reach_target_demos.pkl
+export CHECKPOINT_PATH=/home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_reach_target/conrft
 bash run_learner_conrft.sh
-bash run_actor_conrft.sh
 ```
 
-During actor rollout:
+Actor:
 
-- the actor owns `owner="policy"`
-- SpaceMouse intervention happens inside the env wrapper
-- intervention transitions are inserted into the intervention/demo data store
-- online rollouts are mixed with offline demos by the learner
+```bash
+cd /home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_reach_target
+export CHECKPOINT_PATH=/home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_reach_target/conrft
+bash run_actor_conrft.sh --ip=localhost
+```
 
-Use SpaceMouse whenever the policy drifts or explores inefficiently.
+Online defaults come from `online_training` in `config.yaml`.
 
-The online stage now has its own config section in
-[config.yaml](../examples/experiments/r1lite_reach_target/config.yaml):
+| Config field | Type / range | Meaning |
+| --- | --- | --- |
+| `online_training.checkpoint_path` | path | offline checkpoint to resume |
+| `online_training.demo_path` | path | demo PKL mixed with online data |
+| `online_training.pretrain_steps` | positive int | checkpoint step boundary for resume |
+| `online_training.batch_size` | positive int | learner batch size |
+| `online_training.training_starts` | int >= 0 | online transitions before learner updates |
+| `online_training.steps_per_update` | positive int | update cadence |
+| `online_training.learner.q_weight/bc_weight` | float >= 0 | online actor loss weights |
+| `online_training.actor.xla_mem_fraction` | float in `(0, 1]` | actor JAX memory fraction |
 
-- `online_training.checkpoint_path`
-  Which checkpoint directory to resume from. This is typically the offline
-  pretrain output, but you can point it to another run explicitly.
-- `online_training.demo_path`
-  Which demo file the online learner should continue to mix with online data.
-- `online_training.pretrain_steps`
-  The step boundary used by the learner to decide whether pretraining is
-  already complete when resuming.
-- `online_training.batch_size`
-- `online_training.replay_buffer_capacity`
-- `online_training.cta_ratio`
-- `online_training.discount`
-- `online_training.checkpoint_period`
-- `online_training.buffer_period`
-- `online_training.training_starts`
-- `online_training.steps_per_update`
-- `online_training.log_period`
-- `online_training.eval_period`
-- `online_training.learner.q_weight` / `online_training.learner.bc_weight`
-  Online learner actor-loss weights.
-- `online_training.learner.xla_mem_fraction`
-  JAX memory fraction for the online learner process.
-- `online_training.actor.xla_mem_fraction`
-  JAX memory fraction for the actor process.
+## Path B: Official Leader-Follower + SARM Reward
 
-## 7. Recommended Files And Outputs
+Use this path when the task reward is long-horizon or visual. The reference
+example is `r1lite_dual_mango_box`.
 
-Important inputs:
+### B1. Export RAW Episodes To LeRobot
 
-- experiment config:
-  [config.py](../examples/experiments/r1lite_reach_target/config.py)
-- reward wrapper:
-  [wrapper.py](../examples/experiments/r1lite_reach_target/wrapper.py)
-- demo script:
-  [record_demos_r1lite_octo.py](../examples/record_demos_r1lite_octo.py)
+Run in the `lerobot` environment:
 
-Expected outputs:
+```bash
+cd /home/ps/VLA-RL/conrft-r1lite
+python examples/sarm/export_rosbag_to_lerobot_sarm.py \
+  --input_dirs=/home/ps/VLA-RL/conrft-r1lite/data/RAW/r1lite_dual_mango_box \
+  --task_name=r1lite_dual_mango_box \
+  --task_desc="左臂抓住白色的框放在右臂的周围，右臂抓住发红的芒果，把它放入框内，然后左右机械臂复位。" \
+  --fps=10 \
+  --action_space=eef \
+  --output_repo_id=r1lite_dual_mango_box \
+  --output_dir=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --overwrite
+```
 
-- demos:
-  `data/transition/r1lite_reach_target/*.pkl`
-- checkpoints:
-  `examples/experiments/r1lite_reach_target/conrft/`
+Export script parameters:
 
-## 8. Current Gaps Compared To The Full Franka Workflow
+| Argument | Type / choices | Meaning |
+| --- | --- | --- |
+| `--input_dirs` | comma-separated paths | RAW episode dirs or parent dirs |
+| `--raw_dir_glob` | glob string | child pattern when parent dirs are passed, default `*_RAW` |
+| `--recursive` | flag | recursively scan parent dirs |
+| `--task_name` | string | task name saved in dataset metadata |
+| `--task_desc` | string | language task description |
+| `--fps` | positive float | resampling frequency |
+| `--action_space` | `eef`, `joint` | action labels to store in LeRobot |
+| `--output_repo_id` | string | local/HF-style LeRobot dataset id |
+| `--output_dir` / `--root` | path | local dataset directory |
+| `--overwrite` | flag | remove existing output dataset first |
+| `--no_videos` | flag | store images directly instead of videos |
+| `--vcodec` | codec string | video codec, default `h264` |
+| `--image_writer_threads` | positive int | LeRobot image writer threads |
+| `--<key>_topic` | ROS topic | override `head`, `left_wrist`, `right_wrist`, TCP, joint, gripper topics |
+| `--dry_run_manifest` | JSON path | write manifest only, do not create dataset |
 
-The current R1Lite path is intentionally simpler than the Franka banana task:
+For SARM annotation, keep videos enabled. Browser-based annotation expects
+video columns.
 
-- no classifier data collection step
-- no learned visual reward classifier for success detection
-- reward comes from geometric pose error
+### B2. Annotate And Train The SARM Reward Model
 
-This makes `r1lite_reach_target` the recommended first task for bringing up the
-full ConRFT actor/learner loop on R1Lite.
+Manual annotation UI:
+
+```bash
+cd /home/ps/VLA-RL/conrft-r1lite
+python examples/sarm/manual_annotate_sarm.py \
+  --dataset_root=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --video_key=observation.images.head \
+  --port=8020
+```
+
+Manual annotation parameters:
+
+| Argument | Type / range | Meaning |
+| --- | --- | --- |
+| `--dataset_root` | path | local LeRobotDataset root |
+| `--repo_id` | string | LeRobot repo id, used with `--root` / `HF_LEROBOT_HOME` |
+| `--root` | path | LeRobot cache root |
+| `--annotations_file` | path | sidecar JSON, defaults under dataset `meta/` |
+| `--task_desc` | string | task instruction shown to annotation tools |
+| `--fps` | positive float or omitted | override dataset fps |
+| `--video_key` | column name | video stream for annotation UI |
+| `--episodes` | list of ints | restrict annotation to selected episodes |
+| `--sparse_subtasks` | comma-separated strings | sparse SARM labels |
+| `--dense_subtasks` | comma-separated strings | dense SARM labels |
+| `--overwrite_subtasks` | flag | replace existing subtask definitions |
+| `--no_backup` | flag | skip parquet/proportion backup |
+| `--prepare_only` | flag | write sidecar and exit |
+| `--host` | host | UI bind host |
+| `--port` | int in `1..65535` | UI port |
+| `--no_browser` | flag | do not open browser automatically |
+
+Train SARM from the LeRobot repo:
+
+```bash
+cd /home/ps/VLA-RL/lerobot
+export HF_LEROBOT_HOME=/home/ps/VLA-RL/conrft-r1lite/data/lerobot
+export PYTHONPATH=/home/ps/VLA-RL/lerobot/src:$PYTHONPATH
+
+lerobot-train \
+  --dataset.repo_id=r1lite_dual_mango_box \
+  --policy.type=sarm \
+  --policy.annotation_mode=dual \
+  --policy.state_key=observation.state \
+  --policy.frame_gap=10 \
+  --policy.push_to_hub=false \
+  --output_dir=/home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm \
+  --batch_size=4 \
+  --steps=5000 \
+  --num_workers=6
+```
+
+Key SARM training parameters:
+
+| Argument | Type / range | Meaning |
+| --- | --- | --- |
+| `--dataset.repo_id` | dataset id | LeRobot dataset to train on |
+| `--policy.type` | `sarm` | reward model policy type |
+| `--policy.annotation_mode` | `sparse`, `dense`, `dual` | which annotation heads to train |
+| `--policy.state_key` | column name | state column, normally `observation.state` |
+| `--policy.frame_gap` | positive int | temporal frame gap for SARM inputs |
+| `--output_dir` | path | training output directory |
+| `--batch_size` | positive int | training batch size |
+| `--steps` | positive int | training steps |
+| `--num_workers` | int >= 0 | dataloader workers |
+
+Compute per-frame SARM progress:
+
+```bash
+cd /home/ps/VLA-RL/lerobot
+python -m lerobot.policies.sarm.compute_rabc_weights \
+  --dataset-repo-id r1lite_dual_mango_box \
+  --reward-model-path /home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm/checkpoints/005000/pretrained_model \
+  --head-mode dense \
+  --output-path /home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box/sarm_progress.parquet \
+  --output-dir /home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/rabc_viz \
+  --stride 1
+```
+
+Progress computation parameters:
+
+| Argument | Type / choices | Meaning |
+| --- | --- | --- |
+| `--dataset-repo-id` | dataset id | LeRobot dataset id |
+| `--reward-model-path` | path | trained SARM `pretrained_model` directory |
+| `--head-mode` | `sparse`, `dense` | reward head used for progress |
+| `--output-path` | parquet path | writes `sarm_progress.parquet` |
+| `--output-dir` | path | optional visual output directory |
+| `--stride` | positive int | evaluate every N frames |
+
+### B3. Export SARM-Reward ConRFT PKL
+
+Run in the `lerobot` environment:
+
+```bash
+cd /home/ps/VLA-RL/conrft-r1lite
+python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py \
+  --source_lerobot_dataset=/home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box \
+  --config_yaml=/home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/config.yaml \
+  --output_pkl=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward_no_octo.pkl \
+  --head_mode=dense \
+  --success_threshold=0.95 \
+  --success_reward=10.0 \
+  --include_images
+```
+
+Relabel/export parameters:
+
+| Argument | Type / choices | Meaning |
+| --- | --- | --- |
+| `--source_lerobot_dataset` | path | LeRobotDataset containing `sarm_progress.parquet` |
+| `--input_pkl` | path or omitted | legacy mode: relabel existing ConRFT PKL rewards only |
+| `--progress_parquet` | path or omitted | explicit progress file; defaults under dataset root |
+| `--sarm_model` | path or omitted | metadata only |
+| `--head_mode` | `sparse`, `dense` | progress column to consume |
+| `--output_pkl` | path | output ConRFT PKL |
+| `--success_threshold` | float, usually `0..1` | progress value treated as success |
+| `--success_reward` | float | bonus added on success |
+| `--gamma` | float in `[0, 1]` | Monte Carlo return discount |
+| `--reward_scale`, `--reward_bias` | float | dense reward transform |
+| `--reward_clip_low/high` | float | clip progress delta before scaling |
+| `--no_truncate_after_success` | flag | keep frames after success |
+| `--obs_horizon` | positive int | state/image history length |
+| `--include_images` | flag | include image histories in output PKL |
+| `--image_key_map` | `out=column,...` | map ConRFT image keys to LeRobot video columns |
+| `--image_max_width` | int | resize images; `<=0` keeps original resolution |
+| `--embedding_mode` | `none`, `zeros` | placeholder embedding behavior for smoke tests |
+| `--allow_zero_embeddings` | flag | required with `--embedding_mode=zeros` |
+| `--config_yaml` | path | reads `control.*` and `gripper.*` scales |
+| `--action_space` | `eef` | ConRFT env action type |
+| `--xyz_scale`, `--rot_scale` | positive float | override YAML action scales |
+| `--gripper_max` | positive float | physical gripper value mapped to normalized `+1` |
+| `--no_clip_action` | flag | do not clip normalized labels to `[-1, 1]` |
+| `--max_episodes`, `--max_transitions` | positive int or omitted | limited export runs |
+
+The generated actions use `euler_left` rotation semantics and canonical
+`gym_sorted` state layout.
+
+Add real Octo embeddings in the `RWRL` environment:
+
+```bash
+cd /home/ps/VLA-RL/conrft-r1lite
+python examples/sarm/add_octo_embeddings_to_conrft_pkl.py \
+  --exp_name=r1lite_dual_mango_box \
+  --input_pkl=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward_no_octo.pkl \
+  --output_pkl=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl
+```
+
+Embedding script parameters:
+
+| Argument | Type / choices | Meaning |
+| --- | --- | --- |
+| `--exp_name` | experiment name | selects image keys and Octo config |
+| `--input_pkl` | path | PKL without real embeddings |
+| `--output_pkl` | path | final training PKL |
+| `--image_keys` | comma-separated keys or omitted | defaults to experiment config |
+| `--jax_platform` | `auto`, `cpu`, `gpu` | JAX backend selection |
+| `--xla_mem_fraction` | float in `(0, 1]` | default JAX GPU memory fraction |
+| `--start_trajectory` | int >= 0 | first trajectory to process |
+| `--max_trajectories` | positive int or omitted | cap trajectories |
+| `--max_transitions_per_trajectory` | positive int or omitted | cap transitions per trajectory |
+
+### B4. Optional Replay Validation
+
+Offline action replay is the recommended check before training:
+
+```bash
+cd /home/ps/VLA-RL/conrft-r1lite/examples
+python replay_transition_r1lite.py \
+  --exp_name=r1lite_dual_mango_box \
+  --input_file=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl \
+  --trajectory_index=0 \
+  --exec_mode=offline \
+  --replay_mode=action \
+  --output_csv=/tmp/mango_replay_errors.csv \
+  --output_summary_json=/tmp/mango_replay_summary.json
+```
+
+For a valid PKL, action-integrated targets should match recorded next TCP poses
+up to numerical precision.
+
+### B5. Offline Training
+
+Run learner-only pretraining:
+
+```bash
+cd /home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box
+export DEMO_PATH=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl
+export CHECKPOINT_PATH=/home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/conrft_sarm
+bash run_learner_conrft_pretrain.sh
+```
+
+The same offline parameters from Path A apply. Defaults come from
+`offline_training` in
+[config.yaml](../examples/experiments/r1lite_dual_mango_box/config.yaml).
+
+### B6. Online Training With SARM Reward
+
+Start the SARM progress sidecar in the `lerobot` environment:
+
+```bash
+cd /home/ps/VLA-RL/conrft-r1lite
+export PYTHONPATH=/home/ps/VLA-RL/lerobot/src:$PYTHONPATH
+python examples/sarm/sarm_progress_sidecar.py \
+  --reward_model_path=/home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm/checkpoints/005000/pretrained_model \
+  --host=127.0.0.1 \
+  --port=8010 \
+  --device=cuda \
+  --default_head_mode=dense
+```
+
+Sidecar parameters:
+
+| Argument | Type / choices | Meaning |
+| --- | --- | --- |
+| `--reward_model_path` | path | trained SARM `pretrained_model` directory |
+| `--host` | host | bind host |
+| `--port` | int in `1..65535` | HTTP port |
+| `--device` | torch device string | `cuda`, `cpu`, `cuda:0`, etc. |
+| `--default_head_mode` | `sparse`, `dense` | head used when request omits it |
+| `--log_level` | logging level | `INFO`, `DEBUG`, etc. |
+
+Check the experiment reward model config:
+
+```yaml
+reward_model:
+  enabled: true
+  log_only: true
+  endpoint_url: "http://127.0.0.1:8010"
+  head_mode: "dense"
+```
+
+Use `log_only: true` first to record SARM diagnostics without replacing the env
+reward. Set `log_only: false` when you intentionally want online RL to train on
+SARM reward.
+
+Start learner and actor in separate `RWRL` terminals.
+
+Learner:
+
+```bash
+cd /home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box
+export DEMO_PATH=/home/ps/VLA-RL/conrft-r1lite/data/transition/r1lite_dual_mango_box/r1lite_dual_mango_box_sarm_reward.pkl
+export CHECKPOINT_PATH=/home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/conrft_sarm
+bash run_learner_conrft.sh
+```
+
+Actor:
+
+```bash
+cd /home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box
+export CHECKPOINT_PATH=/home/ps/VLA-RL/conrft-r1lite/examples/experiments/r1lite_dual_mango_box/conrft_sarm
+bash run_actor_conrft.sh --ip=localhost
+```
+
+Online parameters are the same as Path A, with defaults from the mango
+`online_training` config section.
+

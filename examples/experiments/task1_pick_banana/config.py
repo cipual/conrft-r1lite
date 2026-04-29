@@ -102,7 +102,7 @@ class EnvConfig(DefaultEnvConfig):
 class TrainConfig(DefaultTrainingConfig):
     image_keys = ["side_policy_256", "wrist_1"]
     classifier_keys = ["side_classifier"]
-    proprio_keys = ["tcp_pose", "tcp_vel", "tcp_force", "tcp_torque", "gripper_pose"]
+    proprio_keys = ["gripper_pose", "tcp_force", "tcp_pose", "tcp_torque", "tcp_vel"]
     checkpoint_period = 2000
     cta_ratio = 2
     random_steps = 0

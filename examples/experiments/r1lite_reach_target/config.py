@@ -155,7 +155,7 @@ class EnvConfig(R1LiteEnvConfig):
 class TrainConfig(DefaultTrainingConfig):
     arm = _cfg("train.arm", "right")
     image_keys = list(_cfg("train.image_keys", ["image_primary", "image_wrist"])) # 头部相机 + 腕部相机
-    proprio_keys = ["tcp_pose", "tcp_vel", "tcp_force", "tcp_torque", "gripper_pose"]
+    proprio_keys = ["gripper_pose", "tcp_force", "tcp_pose", "tcp_torque", "tcp_vel"]
     # 这些参数直接进入训练循环，按 offline / online 阶段分别读取。
     batch_size = int(_train_cfg("batch_size", 256))
     replay_buffer_capacity = int(_train_cfg("replay_buffer_capacity", 200000))

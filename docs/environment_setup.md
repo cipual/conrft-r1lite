@@ -7,16 +7,16 @@ Assumptions:
 
 - Ubuntu 22.04
 - NVIDIA driver is installed and `nvidia-smi` works
-- Miniforge is installed at `/home/robot/Applications/miniforge3`
-- workspace root is `/home/robot/VLA-RL`
+- Miniforge is installed at `/home/ps/Applications/miniforge3`
+- workspace root is `/home/ps/VLA-RL`
 
 ## 1. Clone Repositories
 
 Use the patched LeRobot fork. It contains the SARM fixes needed by this project.
 
 ```bash
-mkdir -p /home/robot/VLA-RL
-cd /home/robot/VLA-RL
+mkdir -p /home/ps/VLA-RL
+cd /home/ps/VLA-RL
 
 git clone git@github.com:cipual/conrft-r1lite.git
 git clone https://github.com/cipual/lerobot.git
@@ -38,12 +38,12 @@ Use `RWRL` for ConRFT, Octo embeddings, robot envs, replay, offline pretraining,
 and online RL.
 
 ```bash
-source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+source /home/ps/Applications/miniforge3/etc/profile.d/conda.sh
 conda create -n RWRL python=3.10 -y
 conda activate RWRL
 python -m pip install --upgrade pip setuptools wheel
 
-cd /home/robot/VLA-RL/conrft-r1lite
+cd /home/ps/VLA-RL/conrft-r1lite
 python -m pip install -e ./serl_launcher
 python -m pip install -e ./serl_robot_infra
 python -m pip install -e ./octo
@@ -93,12 +93,12 @@ Use `lerobot` for RAW rosbag export, LeRobot datasets, SARM annotation, SARM
 training, and SARM progress computation.
 
 ```bash
-source /home/robot/Applications/miniforge3/etc/profile.d/conda.sh
+source /home/ps/Applications/miniforge3/etc/profile.d/conda.sh
 conda create -n lerobot python=3.12 -y
 conda activate lerobot
 python -m pip install --upgrade pip setuptools wheel
 
-cd /home/robot/VLA-RL/lerobot
+cd /home/ps/VLA-RL/lerobot
 python -m pip install -e .
 
 python -m pip install --upgrade \
@@ -149,8 +149,8 @@ export HF_DATASETS_OFFLINE=1
 For SARM / LeRobot work:
 
 ```bash
-export HF_LEROBOT_HOME=/home/robot/VLA-RL/conrft-r1lite/data/lerobot
-export PYTHONPATH=/home/robot/VLA-RL/lerobot/src:$PYTHONPATH
+export HF_LEROBOT_HOME=/home/ps/VLA-RL/conrft-r1lite/data/lerobot
+export PYTHONPATH=/home/ps/VLA-RL/lerobot/src:$PYTHONPATH
 ```
 
 ## 6. Minimal Workflow Checks
@@ -159,13 +159,13 @@ Check ConRFT env shape:
 
 ```bash
 conda activate RWRL
-cd /home/robot/VLA-RL/conrft-r1lite
+cd /home/ps/VLA-RL/conrft-r1lite
 python - <<'PY'
 import sys
 sys.path[:0] = [
-    "/home/robot/VLA-RL/conrft-r1lite/examples",
-    "/home/robot/VLA-RL/conrft-r1lite/serl_robot_infra",
-    "/home/robot/VLA-RL/conrft-r1lite/serl_launcher",
+    "/home/ps/VLA-RL/conrft-r1lite/examples",
+    "/home/ps/VLA-RL/conrft-r1lite/serl_robot_infra",
+    "/home/ps/VLA-RL/conrft-r1lite/serl_launcher",
 ]
 from experiments.r1lite_dual_mango_box.config import TrainConfig
 env = TrainConfig().get_environment(fake_env=True)
@@ -184,11 +184,11 @@ Check SARM scripts:
 
 ```bash
 conda activate lerobot
-cd /home/robot/VLA-RL/conrft-r1lite
+cd /home/ps/VLA-RL/conrft-r1lite
 python examples/sarm/export_rosbag_to_lerobot_sarm.py --help
 python examples/sarm/relabel_rosbag_or_conrft_with_sarm_reward.py --help
 
-cd /home/robot/VLA-RL/lerobot
+cd /home/ps/VLA-RL/lerobot
 python -m lerobot.policies.sarm.compute_rabc_weights --help
 ```
 
@@ -200,5 +200,5 @@ python -m lerobot.policies.sarm.compute_rabc_weights --help
 - `RWRL` and `lerobot` should stay separate. Mixing their Torch/JAX/Transformers
   stacks is the fastest way to make the environment spicy in all the wrong ways.
 - Data, checkpoints, videos, and generated pkl files live under
-  `/home/robot/VLA-RL/conrft-r1lite/data` or `examples/*/outputs`; they are not
+  `/home/ps/VLA-RL/conrft-r1lite/data` or `examples/*/outputs`; they are not
   tracked by git.

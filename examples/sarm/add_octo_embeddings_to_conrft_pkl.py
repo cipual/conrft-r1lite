@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
+import gc
+import os
 import pickle as pkl
 import sys
 from pathlib import Path
@@ -16,9 +18,6 @@ for path in (
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
-
-from data_util import add_embeddings_to_trajectory, add_next_embeddings_to_trajectory  # noqa: E402
-from experiments.mappings import CONFIG_MAPPING  # noqa: E402
 
 
 def _split_trajectories(transitions: List[Dict]) -> List[List[Dict]]:
@@ -44,6 +43,30 @@ def _load_octo_model():
     return OctoModel
 
 
+def _configure_native_runtime(args):
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", str(args.xla_mem_fraction))
+    os.environ.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
+    if args.jax_platform == "cpu":
+        os.environ["JAX_PLATFORM_NAME"] = "cpu"
+        os.environ["JAX_PLATFORMS"] = "cpu"
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    elif args.jax_platform == "gpu":
+        os.environ["JAX_PLATFORM_NAME"] = "gpu"
+        os.environ["JAX_PLATFORMS"] = "cuda"
+
+
+def _disable_tensorflow_gpu_if_needed(args):
+    if args.jax_platform == "cpu":
+        return
+    import tensorflow as tf
+
+    # Octo uses TensorFlow only for checkpoint/file utilities here. Let JAX own
+    # CUDA; otherwise TF and JAX can both initialize cuDNN/cuBLAS and crash in
+    # native code before Python can raise an exception.
+    tf.config.set_visible_devices([], "GPU")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Add real Octo embeddings/next_embeddings to a ConRFT transition pkl."
@@ -56,7 +79,27 @@ def main():
         default=None,
         help="Comma-separated image keys to feed to Octo. Defaults to the experiment config image_keys.",
     )
+    parser.add_argument(
+        "--jax_platform",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Set before importing JAX/Octo. Use cpu when GPU native libs segfault.",
+    )
+    parser.add_argument(
+        "--xla_mem_fraction",
+        type=float,
+        default=0.35,
+        help="Default XLA_PYTHON_CLIENT_MEM_FRACTION when not already set.",
+    )
+    parser.add_argument("--start_trajectory", type=int, default=0)
+    parser.add_argument("--max_trajectories", type=int, default=None)
+    parser.add_argument("--max_transitions_per_trajectory", type=int, default=None)
     args = parser.parse_args()
+    _configure_native_runtime(args)
+    _disable_tensorflow_gpu_if_needed(args)
+
+    from experiments.mappings import CONFIG_MAPPING
+    from data_util import add_embeddings_to_trajectory, add_next_embeddings_to_trajectory
 
     cfg = CONFIG_MAPPING[args.exp_name]()
     image_keys = (
@@ -77,7 +120,18 @@ def main():
 
     output: List[Dict] = []
     trajectories = _split_trajectories(transitions)
-    for index, trajectory in enumerate(trajectories):
+    stop_trajectory = (
+        len(trajectories)
+        if args.max_trajectories is None
+        else min(len(trajectories), args.start_trajectory + args.max_trajectories)
+    )
+    if args.start_trajectory < 0 or args.start_trajectory >= len(trajectories):
+        raise IndexError(f"--start_trajectory={args.start_trajectory} out of range for {len(trajectories)} trajectories")
+
+    for index in range(args.start_trajectory, stop_trajectory):
+        trajectory = trajectories[index]
+        if args.max_transitions_per_trajectory is not None:
+            trajectory = trajectory[: max(0, args.max_transitions_per_trajectory)]
         print(f"Adding Octo embeddings: trajectory {index + 1}/{len(trajectories)} ({len(trajectory)} transitions)")
         trajectory = add_embeddings_to_trajectory(
             trajectory,
@@ -87,6 +141,17 @@ def main():
         )
         trajectory = add_next_embeddings_to_trajectory(trajectory)
         output.extend(trajectory)
+        gc.collect()
+
+    if (
+        args.start_trajectory > 0
+        or stop_trajectory < len(trajectories)
+        or args.max_transitions_per_trajectory is not None
+    ):
+        print(
+            f"Wrote only trajectories [{args.start_trajectory}, {stop_trajectory}) "
+            "or a transition limit was selected. Do not use this partial pkl for training."
+        )
 
     output_pkl = Path(args.output_pkl).expanduser().resolve()
     output_pkl.parent.mkdir(parents=True, exist_ok=True)

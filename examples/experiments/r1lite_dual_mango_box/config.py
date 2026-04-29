@@ -56,10 +56,31 @@ def _train_cfg(path: str, default):
     return _cfg(f"offline_training.{path}", default)
 
 
+def _resolve_runtime_path(value):
+    if value in (None, ""):
+        return value
+    path = Path(str(value)).expanduser()
+    if path.is_absolute():
+        return str(path)
+    return str((_CONFIG_DIR / path).resolve())
+
+
 def _runtime_defaults() -> dict:
+    offline_checkpoint_path = _resolve_runtime_path(
+        _cfg("offline_training.checkpoint_path", "./conrft_sarm")
+    )
+    offline_demo_path = _resolve_runtime_path(
+        _cfg("offline_training.demo_path", "./demo_data/replace_me.pkl")
+    )
+    online_checkpoint_path = _resolve_runtime_path(
+        _cfg("online_training.checkpoint_path", _cfg("offline_training.checkpoint_path", "./conrft_sarm"))
+    )
+    online_demo_path = _resolve_runtime_path(
+        _cfg("online_training.demo_path", _cfg("offline_training.demo_path", "./demo_data/replace_me.pkl"))
+    )
     return {
-        "checkpoint_path": _cfg("offline_training.checkpoint_path", "./conrft"),
-        "demo_path": _cfg("offline_training.demo_path", "./demo_data/replace_me.pkl"),
+        "checkpoint_path": offline_checkpoint_path,
+        "demo_path": offline_demo_path,
         "pretrain_steps": int(_cfg("offline_training.pretrain_steps", 20000)),
         "pretrain_q_weight": float(_cfg("offline_training.pretrain.q_weight", 0.1)),
         "pretrain_bc_weight": float(_cfg("offline_training.pretrain.bc_weight", 1.0)),
@@ -68,14 +89,8 @@ def _runtime_defaults() -> dict:
         "debug": bool(_cfg("offline_training.debug", False)),
         "xla_mem_fraction_pretrain": float(_cfg("offline_training.pretrain.xla_mem_fraction", 0.85)),
         "xla_mem_fraction_learner": float(_cfg("offline_training.learner.xla_mem_fraction", 0.5)),
-        "online_checkpoint_path": _cfg(
-            "online_training.checkpoint_path",
-            _cfg("offline_training.checkpoint_path", "./conrft"),
-        ),
-        "online_demo_path": _cfg(
-            "online_training.demo_path",
-            _cfg("offline_training.demo_path", "./demo_data/replace_me.pkl"),
-        ),
+        "online_checkpoint_path": online_checkpoint_path,
+        "online_demo_path": online_demo_path,
         "online_pretrain_steps": int(
             _cfg("online_training.pretrain_steps", _cfg("offline_training.pretrain_steps", 20000))
         ),
@@ -154,16 +169,16 @@ class TrainConfig(DefaultTrainingConfig):
     arm = _cfg("train.arm", "dual")
     image_keys = list(_cfg("train.image_keys", ["head", "left_wrist", "right_wrist"]))
     proprio_keys = [
-        "left/tcp_pose",
-        "left/tcp_vel",
+        "left/gripper_pose",
         "left/joint_pos",
         "left/joint_vel",
-        "left/gripper_pose",
-        "right/tcp_pose",
-        "right/tcp_vel",
+        "left/tcp_pose",
+        "left/tcp_vel",
+        "right/gripper_pose",
         "right/joint_pos",
         "right/joint_vel",
-        "right/gripper_pose",
+        "right/tcp_pose",
+        "right/tcp_vel",
         "torso_pos",
     ]
     batch_size = int(_train_cfg("batch_size", 256))

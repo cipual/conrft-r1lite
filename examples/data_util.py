@@ -118,8 +118,11 @@ def add_embeddings_to_trajectory(
 
         # remove window_size dimension
         action_embeddings = action_embeddings[:, -1, :]
+        action_embeddings = np.asarray(jax.device_get(action_embeddings), dtype=np.float32)
+        if action_embeddings.shape[0] == 1:
+            action_embeddings = action_embeddings[0]
 
-        trajectory[i]['embeddings'] = action_embeddings
+        trajectory[i]['embeddings'] = action_embeddings.copy()
 
     return trajectory
 

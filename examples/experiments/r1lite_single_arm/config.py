@@ -18,7 +18,7 @@ class EnvConfig(R1LiteEnvConfig):
 class TrainConfig(DefaultTrainingConfig):
     arm = "right"
     image_keys = ["image_primary", "image_wrist"]
-    proprio_keys = ["tcp_pose", "tcp_vel", "tcp_force", "tcp_torque", "gripper_pose"]
+    proprio_keys = ["gripper_pose", "tcp_force", "tcp_pose", "tcp_torque", "tcp_vel"]
     checkpoint_period = 2000
     cta_ratio = 2
     random_steps = 0

@@ -288,6 +288,12 @@ def rotvec_delta(current_xyzw: np.ndarray, next_xyzw: np.ndarray) -> np.ndarray:
     return (Rotation.from_quat(current_xyzw).inv() * Rotation.from_quat(next_xyzw)).as_rotvec().astype(np.float32)
 
 
+def euler_left_delta_xyz(current_xyzw: np.ndarray, next_xyzw: np.ndarray) -> np.ndarray:
+    current = Rotation.from_quat(current_xyzw)
+    nxt = Rotation.from_quat(next_xyzw)
+    return (nxt * current.inv()).as_euler("xyz").astype(np.float32)
+
+
 def tcp_velocity(current_pose: np.ndarray, next_pose: np.ndarray, dt: float) -> np.ndarray:
     if dt <= 0:
         return np.zeros((6,), dtype=np.float32)
@@ -323,10 +329,16 @@ def action_vector(current: Dict[str, Any], nxt: Dict[str, Any], action_space: st
     right_gripper_delta = nxt["right_gripper"] - current["right_gripper"]
     if action_space == "eef":
         left_delta = np.concatenate(
-            [nxt["left_tcp_pose"][:3] - current["left_tcp_pose"][:3], rotvec_delta(current["left_tcp_pose"][3:], nxt["left_tcp_pose"][3:])]
+            [
+                nxt["left_tcp_pose"][:3] - current["left_tcp_pose"][:3],
+                euler_left_delta_xyz(current["left_tcp_pose"][3:], nxt["left_tcp_pose"][3:]),
+            ]
         )
         right_delta = np.concatenate(
-            [nxt["right_tcp_pose"][:3] - current["right_tcp_pose"][:3], rotvec_delta(current["right_tcp_pose"][3:], nxt["right_tcp_pose"][3:])]
+            [
+                nxt["right_tcp_pose"][:3] - current["right_tcp_pose"][:3],
+                euler_left_delta_xyz(current["right_tcp_pose"][3:], nxt["right_tcp_pose"][3:]),
+            ]
         )
     elif action_space == "joint":
         left_delta = nxt["left_joint"]["position"] - current["left_joint"]["position"]

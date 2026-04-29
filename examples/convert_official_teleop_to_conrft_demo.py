@@ -104,7 +104,7 @@ def _load_task_config(exp_name: str) -> ConversionConfig:
         exp_name=exp_name,
         arm=cfg.arm,
         image_keys=tuple(cfg.image_keys),
-        proprio_keys=tuple(getattr(cfg, "proprio_keys", [])),
+        proprio_keys=tuple(sorted(getattr(cfg, "proprio_keys", []))),
         control_hz=float(getattr(env_cfg, "CONTROL_HZ", 10.0)),
         action_xyz_scale=float(np.asarray(getattr(env_cfg, "ACTION_SCALE"))[0]),
         action_rot_scale=float(np.asarray(getattr(env_cfg, "ACTION_SCALE"))[1]),
@@ -521,6 +521,7 @@ def _build_dense_frames(
 
 
 def _compose_proprio_state(frame: Dict[str, Any], proprio_keys: Sequence[str]) -> np.ndarray:
+    proprio_keys = tuple(sorted(proprio_keys))
     field_map = {
         "tcp_pose": frame["tcp_pose"],
         "tcp_vel": frame["tcp_vel"],
@@ -643,6 +644,11 @@ def _build_transitions(
                 "timestamp_ns": int(frames[idx]["timestamp_ns"]),
                 "next_timestamp_ns": int(frames[idx + 1]["timestamp_ns"]),
                 "conversion_source": "official_teleop_rosbags",
+                "state_layout": "gym_sorted",
+                "proprio_keys": tuple(cfg.proprio_keys),
+                "action_type": "env_normalized_eef_delta_and_absolute_gripper_target",
+                "xyz_scale": float(cfg.action_xyz_scale),
+                "rot_scale": float(cfg.action_rot_scale),
             },
         }
         transitions.append(transition)

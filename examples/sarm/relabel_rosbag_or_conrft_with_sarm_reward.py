@@ -10,11 +10,62 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import cv2
 import numpy as np
 import yaml
+from scipy.spatial.transform import Rotation
 
 
-LEFT_GRIPPER_STATE_INDEX = 25
-RIGHT_GRIPPER_STATE_INDEX = 51
+_FIELD_SHAPES = {
+    "left/tcp_pose": 7,
+    "left/tcp_vel": 6,
+    "left/joint_pos": 6,
+    "left/joint_vel": 6,
+    "left/gripper_pose": 1,
+    "right/tcp_pose": 7,
+    "right/tcp_vel": 6,
+    "right/joint_pos": 6,
+    "right/joint_vel": 6,
+    "right/gripper_pose": 1,
+    "torso_pos": 1,
+}
+_LEROBOT_DUAL_STATE_KEYS = (
+    "left/tcp_pose",
+    "left/tcp_vel",
+    "left/joint_pos",
+    "left/joint_vel",
+    "left/gripper_pose",
+    "right/tcp_pose",
+    "right/tcp_vel",
+    "right/joint_pos",
+    "right/joint_vel",
+    "right/gripper_pose",
+    "torso_pos",
+)
+_CANONICAL_DUAL_STATE_KEYS = tuple(sorted(_LEROBOT_DUAL_STATE_KEYS))
 _ARG_DEFAULT = object()
+
+
+def _flat_slices(keys: Tuple[str, ...]) -> Dict[str, slice]:
+    slices = {}
+    offset = 0
+    for key in keys:
+        width = _FIELD_SHAPES[key]
+        slices[key] = slice(offset, offset + width)
+        offset += width
+    return slices
+
+
+_LEROBOT_DUAL_SLICES = _flat_slices(_LEROBOT_DUAL_STATE_KEYS)
+_CANONICAL_DUAL_SLICES = _flat_slices(_CANONICAL_DUAL_STATE_KEYS)
+
+
+def _canonicalize_lerobot_dual_state(state: np.ndarray) -> np.ndarray:
+    state = np.asarray(state, dtype=np.float32).reshape(-1)
+    expected_dim = sum(_FIELD_SHAPES[key] for key in _LEROBOT_DUAL_STATE_KEYS)
+    if state.size != expected_dim:
+        raise ValueError(f"Expected {expected_dim}-D LeRobot dual state, got {state.shape}")
+    out = np.zeros((expected_dim,), dtype=np.float32)
+    for key in _CANONICAL_DUAL_STATE_KEYS:
+        out[_CANONICAL_DUAL_SLICES[key]] = state[_LEROBOT_DUAL_SLICES[key]]
+    return out
 
 
 def _split_trajectories(transitions: List[Dict]) -> List[List[Dict]]:
@@ -310,9 +361,10 @@ def _state_history(frame_table, global_index: int, episode_start_index: int, obs
     states = []
     for index in indices:
         if index in rows.index:
-            states.append(np.asarray(rows.loc[index]["observation.state"], dtype=np.float32))
+            raw_state = np.asarray(rows.loc[index]["observation.state"], dtype=np.float32)
         else:
-            states.append(np.asarray(rows.loc[episode_start_index]["observation.state"], dtype=np.float32))
+            raw_state = np.asarray(rows.loc[episode_start_index]["observation.state"], dtype=np.float32)
+        states.append(_canonicalize_lerobot_dual_state(raw_state))
     return np.stack(states, axis=0).astype(np.float32)
 
 
@@ -387,8 +439,15 @@ def _normalized_gripper_target(state: np.ndarray, index: int, gripper_max: float
     return float(state[index] / (0.5 * gripper_max) - 1.0)
 
 
+def _euler_left_delta_xyz(current_xyzw: np.ndarray, next_xyzw: np.ndarray) -> np.ndarray:
+    current = Rotation.from_quat(current_xyzw)
+    nxt = Rotation.from_quat(next_xyzw)
+    return (nxt * current.inv()).as_euler("xyz").astype(np.float32)
+
+
 def _action_for_conrft_env(
     raw_lerobot_action: np.ndarray,
+    current_state: np.ndarray,
     next_state: np.ndarray,
     action_space: str,
     xyz_scale: float,
@@ -398,17 +457,20 @@ def _action_for_conrft_env(
 ) -> np.ndarray:
     """Convert LeRobot physical action labels into the action expected by the RL env.
 
-    LeRobot SARM export stores physical actions:
-    - eef: [left dx/dy/dz meters, left rotvec radians, left gripper delta,
-            right dx/dy/dz meters, right rotvec radians, right gripper delta]
+    ConRFT R1Lite env uses the repository default rotation convention:
+    - delta rotation is euler-left XYZ, applied as
+      Rotation.from_euler("xyz", delta) * current_rotation
 
     DualR1LiteEnv expects normalized action:
-    - eef: [delta_xyz / xyz_scale, delta_rot / rot_scale, gripper_target_norm]
+    - eef: [delta_xyz / xyz_scale, delta_euler_left / rot_scale, gripper_target_norm]
 
-    The gripper command in the env is an absolute target, not a delta, so it is
-    reconstructed from the recorded next observation.
+    Position and rotation labels are reconstructed from current/next recorded
+    TCP poses instead of trusting the source action column. The gripper command
+    in the env is an absolute target, not a delta, so it is reconstructed from
+    the recorded next observation.
     """
     raw = np.asarray(raw_lerobot_action, dtype=np.float32).reshape(-1)
+    current_state = np.asarray(current_state, dtype=np.float32).reshape(-1)
     next_state = np.asarray(next_state, dtype=np.float32).reshape(-1)
     if action_space != "eef":
         raise ValueError(
@@ -420,13 +482,28 @@ def _action_for_conrft_env(
     if xyz_scale <= 0 or rot_scale <= 0:
         raise ValueError(f"--xyz_scale and --rot_scale must be positive, got {xyz_scale}, {rot_scale}")
 
+    canonical_current_state = _canonicalize_lerobot_dual_state(current_state)
+    canonical_next_state = _canonicalize_lerobot_dual_state(next_state)
+    left_current_pose = canonical_current_state[_CANONICAL_DUAL_SLICES["left/tcp_pose"]]
+    left_next_pose = canonical_next_state[_CANONICAL_DUAL_SLICES["left/tcp_pose"]]
+    right_current_pose = canonical_current_state[_CANONICAL_DUAL_SLICES["right/tcp_pose"]]
+    right_next_pose = canonical_next_state[_CANONICAL_DUAL_SLICES["right/tcp_pose"]]
+
     action = np.zeros((14,), dtype=np.float32)
-    action[0:3] = raw[0:3] / float(xyz_scale)
-    action[3:6] = raw[3:6] / float(rot_scale)
-    action[6] = _normalized_gripper_target(next_state, LEFT_GRIPPER_STATE_INDEX, gripper_max)
-    action[7:10] = raw[7:10] / float(xyz_scale)
-    action[10:13] = raw[10:13] / float(rot_scale)
-    action[13] = _normalized_gripper_target(next_state, RIGHT_GRIPPER_STATE_INDEX, gripper_max)
+    action[0:3] = (left_next_pose[:3] - left_current_pose[:3]) / float(xyz_scale)
+    action[3:6] = _euler_left_delta_xyz(left_current_pose[3:], left_next_pose[3:]) / float(rot_scale)
+    action[6] = _normalized_gripper_target(
+        canonical_next_state,
+        _CANONICAL_DUAL_SLICES["left/gripper_pose"].start,
+        gripper_max,
+    )
+    action[7:10] = (right_next_pose[:3] - right_current_pose[:3]) / float(xyz_scale)
+    action[10:13] = _euler_left_delta_xyz(right_current_pose[3:], right_next_pose[3:]) / float(rot_scale)
+    action[13] = _normalized_gripper_target(
+        canonical_next_state,
+        _CANONICAL_DUAL_SLICES["right/gripper_pose"].start,
+        gripper_max,
+    )
     if clip_action:
         action = np.clip(action, -1.0, 1.0)
     return action.astype(np.float32)
@@ -566,6 +643,7 @@ def _build_conrft_from_lerobot(
                     ),
                     "actions": _action_for_conrft_env(
                         raw_lerobot_action=np.asarray(current["action"], dtype=np.float32),
+                        current_state=np.asarray(current["observation.state"], dtype=np.float32),
                         next_state=np.asarray(nxt["observation.state"], dtype=np.float32),
                         action_space=action_space,
                         xyz_scale=xyz_scale,
@@ -595,7 +673,12 @@ def _build_conrft_from_lerobot(
                         "frame_index": int(current["frame_index"]),
                         "next_frame_index": int(nxt["frame_index"]),
                         "conversion_source": "lerobot_sarm_progress",
-                        "action_type": "env_normalized_eef_delta_and_absolute_gripper_target",
+                        "state_layout": "gym_sorted",
+                        "source_state_layout": "lerobot_dual",
+                        "proprio_keys": _CANONICAL_DUAL_STATE_KEYS,
+                        "action_type": "env_normalized_eef_delta_euler_left_and_absolute_gripper_target",
+                        "rotation_mode": "euler_left",
+                        "reference_pose": "commanded",
                         "xyz_scale": float(xyz_scale),
                         "rot_scale": float(rot_scale),
                         "gripper_max": float(gripper_max),

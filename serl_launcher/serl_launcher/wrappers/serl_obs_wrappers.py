@@ -10,10 +10,11 @@ class SERLObsWrapper(gym.ObservationWrapper):
 
     def __init__(self, env, proprio_keys=None):
         super().__init__(env)
-        self.proprio_keys = proprio_keys
-        if self.proprio_keys is None:
-            self.proprio_keys = list(self.env.observation_space["state"].keys())
-
+        if proprio_keys is None:
+            proprio_keys = list(self.env.observation_space["state"].keys())
+        # Canonical state ABI: gym.spaces.Dict key order. All offline converters
+        # must write flattened states in this exact sorted order.
+        self.proprio_keys = sorted(proprio_keys)
         self.proprio_space = gym.spaces.Dict(
             {key: self.env.observation_space["state"][key] for key in self.proprio_keys}
         )
@@ -40,6 +41,7 @@ class SERLObsWrapper(gym.ObservationWrapper):
         return self.observation(obs), info
 
 def flatten_observations(obs, proprio_space, proprio_keys):
+        proprio_keys = sorted(proprio_keys)
         obs = {
             "state": flatten(
                 proprio_space,

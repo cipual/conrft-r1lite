@@ -2,7 +2,10 @@
 
 import glob
 import signal
+import sys
+import termios
 import time
+import tty
 import cv2
 import jax
 import jax.numpy as jnp
@@ -75,6 +78,19 @@ def print_green(x):
     return print("\033[92m {}\033[00m".format(x))
 
 
+def _latest_transition_file_step(buffer_dir: str) -> int:
+    if not buffer_dir or not os.path.exists(buffer_dir):
+        return -1
+    files = natsorted(glob.glob(os.path.join(buffer_dir, "transitions_*.pkl")))
+    if not files:
+        return -1
+    stem = os.path.splitext(os.path.basename(files[-1]))[0]
+    try:
+        return int(stem.removeprefix("transitions_"))
+    except ValueError as exc:
+        raise ValueError(f"Unexpected transition buffer filename: {files[-1]}") from exc
+
+
 def _request_shutdown(signum=None, _frame=None):
     global _SHUTDOWN_REQUESTED
     if not _SHUTDOWN_REQUESTED:
@@ -100,6 +116,88 @@ def _safe_close(obj, name: str):
             stop_fn()
         except Exception as exc:
             print(f"[cleanup-warning] failed to stop {name}: {exc}")
+
+
+def _read_single_key(prompt: str) -> str:
+    print(prompt, end="", flush=True)
+    if not sys.stdin.isatty():
+        return input().strip().lower()[:1]
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        key = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    print(key)
+    return key.lower()
+
+
+def _wait_for_actor_debug_step(step: int, actions: np.ndarray) -> bool:
+    flat_action = np.asarray(actions, dtype=np.float32).reshape(-1)
+    if flat_action.size >= 14:
+        left = flat_action[:7]
+        right = flat_action[7:14]
+        print(
+            "[actor-debug] "
+            f"step={step} "
+            f"left_xyz={left[:3]} left_rpy={left[3:6]} left_grip={left[6]:.3f} "
+            f"right_xyz={right[:3]} right_rpy={right[3:6]} right_grip={right[6]:.3f}"
+        )
+    else:
+        print(f"[actor-debug] step={step} action={flat_action}")
+
+    while True:
+        key = _read_single_key("[actor-debug] press 's' to execute one step, 'q' to quit: ")
+        if key == "s":
+            return True
+        if key == "q":
+            return False
+
+
+def _format_pose_delta_debug(prefix: str, info: dict):
+    def _pose(key):
+        value = info.get(key)
+        if value is None:
+            return None
+        return np.asarray(value, dtype=np.float32).reshape(-1)
+
+    ref = _pose(f"debug_{prefix}_reference_pose")
+    target = _pose(f"debug_{prefix}_target_pose")
+    unclipped = _pose(f"debug_{prefix}_unclipped_target_pose")
+    nxt = _pose(f"debug_{prefix}_next_pose")
+    if ref is None and prefix == "":
+        ref = _pose("debug_reference_pose")
+        target = _pose("debug_target_pose")
+        nxt = _pose("debug_next_pose")
+        unclipped = target
+    if ref is None or target is None or nxt is None:
+        return
+
+    commanded_delta = target[:3] - ref[:3]
+    actual_delta = nxt[:3] - ref[:3]
+    clip_delta = np.zeros((3,), dtype=np.float32) if unclipped is None else target[:3] - unclipped[:3]
+    label = prefix if prefix else "arm"
+    print(
+        f"[actor-debug:{label}-exec] "
+        f"ref_xyz={np.array2string(ref[:3], precision=4, suppress_small=True)} "
+        f"target_xyz={np.array2string(target[:3], precision=4, suppress_small=True)} "
+        f"next_xyz={np.array2string(nxt[:3], precision=4, suppress_small=True)} "
+        f"cmd_dxyz={np.array2string(commanded_delta, precision=4, suppress_small=True)} "
+        f"actual_dxyz={np.array2string(actual_delta, precision=4, suppress_small=True)} "
+        f"clip_dxyz={np.array2string(clip_delta, precision=4, suppress_small=True)}"
+    )
+
+
+def _maybe_print_actor_step_debug(info: dict):
+    if not FLAGS.debug:
+        return
+    if "debug_left_reference_pose" in info:
+        _format_pose_delta_debug("left", info)
+        _format_pose_delta_debug("right", info)
+    else:
+        _format_pose_delta_debug("", info)
 
 
 def _normalize_runtime_paths():
@@ -161,6 +259,18 @@ def _resize_transition_images_to_env(transition, observation_space, image_keys):
     return transition
 
 
+def _ensure_grasp_penalty(transition):
+    if "grasp_penalty" in transition:
+        return transition
+    transition = transition.copy()
+    infos = transition.get("infos")
+    if isinstance(infos, dict) and "grasp_penalty" in infos:
+        transition["grasp_penalty"] = infos["grasp_penalty"]
+    else:
+        transition["grasp_penalty"] = 0.0
+    return transition
+
+
 ##############################################################################
 
 
@@ -214,12 +324,10 @@ def actor(tasks, agent, data_store, intvn_data_store, env, sampling_rng):
         print(f"average time: {np.mean(time_list)}")
         return  # after done eval, return and exit
 
-    start_step = (
-        int(os.path.basename(natsorted(glob.glob(os.path.join(
-            FLAGS.checkpoint_path, "buffer/*.pkl")))[-1])[12:-4]) + 1
-        if FLAGS.checkpoint_path and os.path.exists(os.path.join(FLAGS.checkpoint_path, "buffer"))
-        else 0
+    latest_buffer_step = _latest_transition_file_step(
+        os.path.join(FLAGS.checkpoint_path, "buffer") if FLAGS.checkpoint_path else ""
     )
+    start_step = latest_buffer_step + 1 if latest_buffer_step >= 0 else 0
 
     datastore_dict = {
         "actor_env": data_store,
@@ -268,6 +376,7 @@ def actor(tasks, agent, data_store, intvn_data_store, env, sampling_rng):
             with timer.context("sample_actions"):
                 if step < config.random_steps:
                     actions = env.action_space.sample()
+                    action_embeddings = None
                 else:
                     sampling_rng, key = jax.random.split(sampling_rng)
                     actions, action_embeddings = agent.sample_actions(
@@ -278,9 +387,13 @@ def actor(tasks, agent, data_store, intvn_data_store, env, sampling_rng):
                     )
                     actions = np.asarray(jax.device_get(actions))
 
+            if FLAGS.debug and not _wait_for_actor_debug_step(step, actions):
+                break
+
             # Step environment
             with timer.context("step_env"):
                 next_obs, reward, done, truncated, info = env.step(actions)
+                _maybe_print_actor_step_debug(info)
                 if "left" in info:
                     info.pop("left")
                 if "right" in info:
@@ -309,6 +422,8 @@ def actor(tasks, agent, data_store, intvn_data_store, env, sampling_rng):
                 )
                 if 'grasp_penalty' in info:
                     transition['grasp_penalty'] = info['grasp_penalty']
+                else:
+                    transition['grasp_penalty'] = 0.0
 
                 trajectory.append(transition)
 
@@ -720,6 +835,8 @@ def main(_):
                     with open(file, "rb") as f:
                         transitions = pkl.load(f)
                         for transition in transitions:
+                            if include_grasp_penalty:
+                                transition = _ensure_grasp_penalty(transition)
                             replay_buffer.insert(transition)
                 print_green(
                     f"Loaded previous buffer data. Replay buffer size: {len(replay_buffer)}")
@@ -733,6 +850,8 @@ def main(_):
                     with open(file, "rb") as f:
                         transitions = pkl.load(f)
                         for transition in transitions:
+                            if include_grasp_penalty:
+                                transition = _ensure_grasp_penalty(transition)
                             demo_buffer.insert(transition)
                 print_green(
                     f"Loaded previous demo buffer data. Demo buffer size: {len(demo_buffer)}")
