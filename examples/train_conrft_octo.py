@@ -66,6 +66,26 @@ flags.DEFINE_integer("pretrain_steps", 2000, "Number of pretrain steps.")
 flags.DEFINE_boolean(
     "debug", False, "Debug mode."
 )  # debug mode will disable wandb logging
+flags.DEFINE_boolean(
+    "debug_block_until_error_small",
+    False,
+    "In debug actor mode, block before the next step until target-vs-next error is below threshold.",
+)
+flags.DEFINE_float(
+    "debug_block_pos_err_m",
+    0.01,
+    "Position error threshold in meters for debug blocking.",
+)
+flags.DEFINE_float(
+    "debug_block_ori_err_rad",
+    0.10,
+    "Orientation error threshold in radians for debug blocking.",
+)
+flags.DEFINE_float(
+    "debug_block_poll_sec",
+    0.2,
+    "Polling interval in seconds for debug blocking.",
+)
 
 
 devices = jax.local_devices()
@@ -73,9 +93,21 @@ num_devices = len(devices)
 sharding = jax.sharding.PositionalSharding(devices)
 _SHUTDOWN_REQUESTED = False
 
+_ANSI_RESET = "\033[0m"
+_ANSI_GREEN = "\033[92m"
+_ANSI_YELLOW = "\033[93m"
+_ANSI_RED = "\033[91m"
+_ANSI_CYAN = "\033[96m"
+_ANSI_MAGENTA = "\033[95m"
+_ANSI_BOLD = "\033[1m"
+
 
 def print_green(x):
     return print("\033[92m {}\033[00m".format(x))
+
+
+def _colorize(text: str, color: str) -> str:
+    return f"{color}{text}{_ANSI_RESET}"
 
 
 def _latest_transition_file_step(buffer_dir: str) -> int:
@@ -140,13 +172,22 @@ def _wait_for_actor_debug_step(step: int, actions: np.ndarray) -> bool:
         left = flat_action[:7]
         right = flat_action[7:14]
         print(
-            "[actor-debug] "
-            f"step={step} "
-            f"left_xyz={left[:3]} left_rpy={left[3:6]} left_grip={left[6]:.3f} "
-            f"right_xyz={right[:3]} right_rpy={right[3:6]} right_grip={right[6]:.3f}"
+            _colorize(f"\n[actor-debug] step={step}", _ANSI_BOLD + _ANSI_CYAN)
+        )
+        print(
+            _colorize("  policy:left ", _ANSI_GREEN)
+            + f"xyz={np.array2string(left[:3], precision=4, suppress_small=True)} "
+            + f"rpy={np.array2string(left[3:6], precision=4, suppress_small=True)} "
+            + f"grip={left[6]:.3f}"
+        )
+        print(
+            _colorize("  policy:right", _ANSI_MAGENTA)
+            + f" xyz={np.array2string(right[:3], precision=4, suppress_small=True)} "
+            + f"rpy={np.array2string(right[3:6], precision=4, suppress_small=True)} "
+            + f"grip={right[6]:.3f}"
         )
     else:
-        print(f"[actor-debug] step={step} action={flat_action}")
+        print(_colorize(f"\n[actor-debug] step={step} action={flat_action}", _ANSI_BOLD + _ANSI_CYAN))
 
     while True:
         key = _read_single_key("[actor-debug] press 's' to execute one step, 'q' to quit: ")
@@ -154,6 +195,14 @@ def _wait_for_actor_debug_step(step: int, actions: np.ndarray) -> bool:
             return True
         if key == "q":
             return False
+
+
+def _debug_error_color(pos_err_m: float, ori_err_rad: float) -> str:
+    if pos_err_m <= FLAGS.debug_block_pos_err_m and ori_err_rad <= FLAGS.debug_block_ori_err_rad:
+        return _ANSI_GREEN
+    if pos_err_m <= (2.0 * FLAGS.debug_block_pos_err_m) and ori_err_rad <= (2.0 * FLAGS.debug_block_ori_err_rad):
+        return _ANSI_YELLOW
+    return _ANSI_RED
 
 
 def _format_pose_delta_debug(prefix: str, info: dict):
@@ -173,31 +222,133 @@ def _format_pose_delta_debug(prefix: str, info: dict):
         nxt = _pose("debug_next_pose")
         unclipped = target
     if ref is None or target is None or nxt is None:
-        return
+        return None
 
     commanded_delta = target[:3] - ref[:3]
     actual_delta = nxt[:3] - ref[:3]
     clip_delta = np.zeros((3,), dtype=np.float32) if unclipped is None else target[:3] - unclipped[:3]
+    pos_err_m = float(np.linalg.norm(nxt[:3] - target[:3]))
+    ori_err_rad = 0.0
+    if ref.shape[0] >= 6 and target.shape[0] >= 6 and nxt.shape[0] >= 6:
+        ori_err_rad = float(np.linalg.norm(nxt[3:6] - target[3:6]))
     label = prefix if prefix else "arm"
+    err_color = _debug_error_color(pos_err_m, ori_err_rad)
+    header_color = _ANSI_GREEN if label == "left" else _ANSI_MAGENTA
+    print(_colorize(f"  [actor-debug:{label}-exec]", _ANSI_BOLD + header_color))
     print(
-        f"[actor-debug:{label}-exec] "
-        f"ref_xyz={np.array2string(ref[:3], precision=4, suppress_small=True)} "
-        f"target_xyz={np.array2string(target[:3], precision=4, suppress_small=True)} "
-        f"next_xyz={np.array2string(nxt[:3], precision=4, suppress_small=True)} "
-        f"cmd_dxyz={np.array2string(commanded_delta, precision=4, suppress_small=True)} "
-        f"actual_dxyz={np.array2string(actual_delta, precision=4, suppress_small=True)} "
-        f"clip_dxyz={np.array2string(clip_delta, precision=4, suppress_small=True)}"
+        f"    ref_xyz    = {np.array2string(ref[:3], precision=4, suppress_small=True)}\n"
+        f"    target_xyz = {np.array2string(target[:3], precision=4, suppress_small=True)}\n"
+        f"    next_xyz   = {np.array2string(nxt[:3], precision=4, suppress_small=True)}"
     )
+    print(
+        f"    cmd_dxyz   = {np.array2string(commanded_delta, precision=4, suppress_small=True)}\n"
+        f"    actual_dxyz= {np.array2string(actual_delta, precision=4, suppress_small=True)}\n"
+        f"    clip_dxyz  = {np.array2string(clip_delta, precision=4, suppress_small=True)}"
+    )
+    print(
+        _colorize(
+            f"    target_err = pos={pos_err_m:.4f} m  ori={ori_err_rad:.4f} rad",
+            err_color,
+        )
+    )
+    return {
+        "label": label,
+        "target_pose": target,
+        "next_pose": nxt,
+        "pos_err_m": pos_err_m,
+        "ori_err_rad": ori_err_rad,
+    }
 
 
 def _maybe_print_actor_step_debug(info: dict):
     if not FLAGS.debug:
-        return
+        return []
     if "debug_left_reference_pose" in info:
-        _format_pose_delta_debug("left", info)
-        _format_pose_delta_debug("right", info)
+        metrics = [
+            _format_pose_delta_debug("left", info),
+            _format_pose_delta_debug("right", info),
+        ]
     else:
-        _format_pose_delta_debug("", info)
+        metrics = [_format_pose_delta_debug("", info)]
+    return [metric for metric in metrics if metric is not None]
+
+
+def _debug_wait_until_small_error(env, metrics) -> bool:
+    if not FLAGS.debug or not FLAGS.debug_block_until_error_small or not metrics:
+        return True
+    if not hasattr(env, "client"):
+        return True
+
+    print(
+        _colorize(
+            (
+                "[actor-debug] blocking until execution error is small enough "
+                f"(pos<={FLAGS.debug_block_pos_err_m:.4f}m, ori<={FLAGS.debug_block_ori_err_rad:.4f}rad)"
+            ),
+            _ANSI_BOLD + _ANSI_YELLOW,
+        )
+    )
+    while True:
+        if _SHUTDOWN_REQUESTED:
+            return False
+        key = _read_single_key("[actor-debug] press 'c' to check error, 's' to skip wait, 'q' to quit: ")
+        if key == "q":
+            return False
+        if key == "s":
+            return True
+        if key != "c":
+            continue
+
+        raw = env.client.get_state()
+        refreshed = []
+        if "left" in raw.get("state", {}) and "right" in raw.get("state", {}):
+            pose_map = {
+                "left": np.asarray(raw["state"]["left"]["tcp_pose"], dtype=np.float32).reshape(-1),
+                "right": np.asarray(raw["state"]["right"]["tcp_pose"], dtype=np.float32).reshape(-1),
+            }
+        else:
+            pose_map = {"arm": np.asarray(raw["state"][env.arm]["tcp_pose"], dtype=np.float32).reshape(-1)}
+
+        all_small = True
+        for metric in metrics:
+            current = pose_map.get(metric["label"], pose_map.get("arm"))
+            if current is None:
+                continue
+            pos_err_m = float(np.linalg.norm(current[:3] - metric["target_pose"][:3]))
+            ori_err_rad = 0.0
+            if current.shape[0] >= 6 and metric["target_pose"].shape[0] >= 6:
+                ori_err_rad = float(np.linalg.norm(current[3:6] - metric["target_pose"][3:6]))
+            refreshed.append((metric["label"], pos_err_m, ori_err_rad))
+            if pos_err_m > FLAGS.debug_block_pos_err_m or ori_err_rad > FLAGS.debug_block_ori_err_rad:
+                all_small = False
+
+        for label, pos_err_m, ori_err_rad in refreshed:
+            color = _debug_error_color(pos_err_m, ori_err_rad)
+            target_xyz = None
+            actual_xyz = None
+            for metric in metrics:
+                if metric["label"] == label:
+                    target_xyz = metric["target_pose"][:3]
+                    break
+            current = pose_map.get(label, pose_map.get("arm"))
+            if current is not None:
+                actual_xyz = current[:3]
+            print(
+                _colorize(
+                    (
+                        f"  [actor-debug:{label}-wait]\n"
+                        f"    target_xyz = {np.array2string(target_xyz, precision=4, suppress_small=True)}\n"
+                        f"    actual_xyz = {np.array2string(actual_xyz, precision=4, suppress_small=True)}\n"
+                        f"    pos_err    = ||actual_xyz - target_xyz|| = {pos_err_m:.4f} m\n"
+                        f"    ori_err    = {ori_err_rad:.4f} rad"
+                    ),
+                    color,
+                )
+            )
+        if all_small:
+            print(_colorize("[actor-debug] error gate passed", _ANSI_BOLD + _ANSI_GREEN))
+            return True
+        time.sleep(max(0.0, FLAGS.debug_block_poll_sec))
 
 
 def _normalize_runtime_paths():
@@ -393,7 +544,9 @@ def actor(tasks, agent, data_store, intvn_data_store, env, sampling_rng):
             # Step environment
             with timer.context("step_env"):
                 next_obs, reward, done, truncated, info = env.step(actions)
-                _maybe_print_actor_step_debug(info)
+                debug_metrics = _maybe_print_actor_step_debug(info)
+                if FLAGS.debug and not _debug_wait_until_small_error(env.unwrapped, debug_metrics):
+                    break
                 if "left" in info:
                     info.pop("left")
                 if "right" in info:

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Probe a ConRFT checkpoint on offline training observations.
 
-This script does not connect to the robot. It loads the experiment config,
-restores an offline checkpoint, samples policy actions on observations from a
-transition PKL, and compares those sampled actions against the training action
-distribution.
+By default this script does not connect to the robot. It loads the experiment
+config, restores an offline checkpoint, samples policy actions on observations
+from a transition PKL, and compares those sampled actions against the training
+action distribution. With --online_reset_obs it also resets the robot and probes
+the policy on the live reset observation without executing policy actions.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import json
 import os
 import pickle as pkl
 import sys
+import time
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
 
@@ -103,6 +105,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Continue into model inference after building a missing cache in this process.",
     )
+    parser.add_argument(
+        "--online_reset_obs",
+        action="store_true",
+        help=(
+            "Also reset the online robot env and sample policy actions on the "
+            "live reset observation. This does not execute policy actions."
+        ),
+    )
+    parser.add_argument("--online_reset_count", type=int, default=1)
+    parser.add_argument("--online_reset_wait_sec", type=float, default=1.0)
     parser.add_argument("--no_csv", action="store_true")
     return parser.parse_args()
 
@@ -247,6 +259,33 @@ def comparison_summary(train_actions: np.ndarray, sampled_actions: np.ndarray) -
     return out
 
 
+def teacher_error_summary(
+    sampled_actions: np.ndarray,
+    teacher_actions: np.ndarray,
+    samples_per_obs: int,
+) -> Dict:
+    repeated_teacher = np.repeat(teacher_actions, samples_per_obs, axis=0)
+    diff = sampled_actions - repeated_teacher
+    out = {"dims": {}, "groups": {}}
+    for i, label in enumerate(ACTION_LABELS):
+        values = np.abs(diff[:, i])
+        out["dims"][label] = {
+            "abs_error_mean": float(np.mean(values)),
+            "abs_error_median": float(np.median(values)),
+            "abs_error_95": float(np.quantile(values, 0.95)),
+            "abs_error_max": float(np.max(values)),
+        }
+    for group, sl in ACTION_GROUPS.items():
+        values = np.linalg.norm(diff[:, sl], axis=1)
+        out["groups"][group] = {
+            "error_norm_mean": float(np.mean(values)),
+            "error_norm_median": float(np.median(values)),
+            "error_norm_95": float(np.quantile(values, 0.95)),
+            "error_norm_max": float(np.max(values)),
+        }
+    return out
+
+
 def write_action_csv(path: Path, indices: np.ndarray, sampled_actions: np.ndarray, samples_per_obs: int):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -263,6 +302,41 @@ def write_action_csv(path: Path, indices: np.ndarray, sampled_actions: np.ndarra
                     ]
                 )
                 row_id += 1
+
+
+def sample_policy_actions(agent, tasks, observations: Dict[str, np.ndarray], config, samples_per_obs: int, rng):
+    sampled = []
+    n_obs = int(observations["state"].shape[0])
+    for obs_idx in range(n_obs):
+        obs = {
+            "state": observations["state"][obs_idx],
+            **{key: observations[key][obs_idx] for key in config.image_keys},
+        }
+        obs = jax.device_put(obs)
+        for _ in range(samples_per_obs):
+            rng, key = jax.random.split(rng)
+            actions, _ = agent.sample_actions(
+                observations=obs,
+                tasks=jax.device_put(tasks),
+                seed=key,
+            )
+            sampled.append(np.asarray(jax.device_get(actions), dtype=np.float32).reshape(-1))
+    return np.stack(sampled, axis=0), rng
+
+
+def collect_online_reset_observations(env, config, count: int, wait_sec: float) -> Dict[str, np.ndarray]:
+    observations = []
+    for i in range(max(1, int(count))):
+        print(f"[debug] collecting online reset observation {i + 1}/{count}...")
+        obs, _ = env.reset()
+        time.sleep(max(0.0, float(wait_sec)))
+        observations.append(resize_transition_obs(obs, env.observation_space, config.image_keys))
+    selected = {
+        "state": np.stack([obs["state"] for obs in observations], axis=0).astype(np.float32),
+    }
+    for key in config.image_keys:
+        selected[key] = np.stack([obs[key] for obs in observations], axis=0).astype(np.uint8)
+    return selected
 
 
 def prepare_cache(args: argparse.Namespace, env, config) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], bool]:
@@ -362,22 +436,15 @@ def main():
     )
 
     rng = jax.random.PRNGKey(args.seed)
-    sampled = []
-    for obs_idx in range(len(indices)):
-        obs = {
-            "state": selected_observations["state"][obs_idx],
-            **{key: selected_observations[key][obs_idx] for key in config.image_keys},
-        }
-        obs = jax.device_put(obs)
-        for _ in range(args.samples_per_obs):
-            rng, key = jax.random.split(rng)
-            actions, _ = agent.sample_actions(
-                observations=obs,
-                tasks=jax.device_put(tasks),
-                seed=key,
-            )
-            sampled.append(np.asarray(jax.device_get(actions), dtype=np.float32).reshape(-1))
-    sampled_actions = np.stack(sampled, axis=0)
+    sampled_actions, rng = sample_policy_actions(
+        agent,
+        tasks,
+        selected_observations,
+        config,
+        args.samples_per_obs,
+        rng,
+    )
+    teacher_actions = train_actions[indices]
 
     summary = {
         "checkpoint_root": str(checkpoint_root),
@@ -390,7 +457,31 @@ def main():
         "train_actions": summarize_actions("train_actions", train_actions),
         "sampled_actions": summarize_actions("sampled_actions", sampled_actions),
         "comparison": comparison_summary(train_actions, sampled_actions),
+        "teacher_error": teacher_error_summary(sampled_actions, teacher_actions, args.samples_per_obs),
     }
+
+    online_sampled_actions = None
+    if args.online_reset_obs:
+        online_observations = collect_online_reset_observations(
+            env,
+            config,
+            args.online_reset_count,
+            args.online_reset_wait_sec,
+        )
+        online_sampled_actions, rng = sample_policy_actions(
+            agent,
+            tasks,
+            online_observations,
+            config,
+            args.samples_per_obs,
+            rng,
+        )
+        summary["online_reset"] = {
+            "count": int(online_observations["state"].shape[0]),
+            "samples_per_obs": int(args.samples_per_obs),
+            "sampled_actions": summarize_actions("online_reset_sampled_actions", online_sampled_actions),
+            "comparison": comparison_summary(train_actions, online_sampled_actions),
+        }
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = args.output_dir / "checkpoint_action_probe_summary.json"
@@ -402,6 +493,13 @@ def main():
             sampled_actions,
             args.samples_per_obs,
         )
+        if online_sampled_actions is not None:
+            write_action_csv(
+                args.output_dir / "checkpoint_action_probe_online_reset_samples.csv",
+                np.arange(int(summary["online_reset"]["count"]), dtype=np.int64),
+                online_sampled_actions,
+                args.samples_per_obs,
+            )
 
     print("\n[group norm comparison: sampled action percentiles vs train action distribution]")
     for group, stats in summary["comparison"]["groups"].items():
@@ -427,6 +525,26 @@ def main():
             f"abs_pct_median={stats['abs_percentile_median']:.1f} "
             f"abs_pct95={stats['abs_percentile_95']:.1f}"
         )
+
+    print("\n[teacher action error on selected recorded observations]")
+    for group, stats in summary["teacher_error"]["groups"].items():
+        print(
+            f"{group:10s} "
+            f"err_median={stats['error_norm_median']:.4f} "
+            f"err95={stats['error_norm_95']:.4f} "
+            f"err_max={stats['error_norm_max']:.4f}"
+        )
+
+    if "online_reset" in summary:
+        print("\n[online reset obs action percentiles vs train action distribution]")
+        for group, stats in summary["online_reset"]["comparison"]["groups"].items():
+            print(
+                f"{group:10s} "
+                f"sample_norm median={stats['sample_norm_median']:.4f} "
+                f"max={stats['sample_norm_max']:.4f} "
+                f"pct_median={stats['norm_percentile_median']:.1f} "
+                f"pct95={stats['norm_percentile_95']:.1f}"
+            )
 
     print(f"\n[debug] wrote summary: {summary_path}")
 

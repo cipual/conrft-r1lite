@@ -479,6 +479,7 @@ source /home/ps/Applications/miniforge3/etc/profile.d/conda.sh
 conda activate lerobot
 cd /home/ps/VLA-RL/conrft-r1lite
 export PYTHONPATH=/home/ps/VLA-RL/lerobot/src:$PYTHONPATH
+unset ALL_PROXY all_proxy
 
 python examples/sarm/sarm_progress_sidecar.py \
   --reward_model_path=/home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_20260422_122234/checkpoints/005000/pretrained_model \

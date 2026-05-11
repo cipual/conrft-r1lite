@@ -28,6 +28,15 @@ def _format_vector(value) -> str:
     return "[" + ", ".join(f"{float(v): .3f}" for v in arr) + "]"
 
 
+def _parse_float_vector(text: Optional[str], expected_len: int, name: str) -> Optional[list]:
+    if text is None or str(text).strip() == "":
+        return None
+    raw = str(text).replace("[", " ").replace("]", " ").replace(",", " ").split()
+    if len(raw) != expected_len:
+        raise ValueError(f"{name} expects {expected_len} floats, got {len(raw)}")
+    return [float(item) for item in raw]
+
+
 def _format_tcp_pose_with_euler(value) -> str:
     if value is None:
         return "-"
@@ -61,7 +70,16 @@ def _make_ppm_image(rgb: np.ndarray) -> bytes:
 
 
 class R1LiteMonitorGUI:
-    def __init__(self, root: tk.Tk, server_url: str, image_hz: float, state_period: float):
+    def __init__(
+        self,
+        root: tk.Tk,
+        server_url: str,
+        image_hz: float,
+        state_period: float,
+        reset_left_joint: Optional[list] = None,
+        reset_right_joint: Optional[list] = None,
+        reset_torso: Optional[list] = None,
+    ):
         self.root = root
         self.client = R1LiteClient(server_url, timeout=2.0)
         self.image_period = max(1.0 / max(image_hz, 1e-3), 0.05)
@@ -80,6 +98,9 @@ class R1LiteMonitorGUI:
         self.info_messages = []
         self.warning_messages = []
         self.fault_messages = []
+        self.reset_left_joint = reset_left_joint
+        self.reset_right_joint = reset_right_joint
+        self.reset_torso = reset_torso
 
         self.root.title("R1Lite Dual-Arm Monitor")
         self.root.geometry("1920x1120")
@@ -99,6 +120,7 @@ class R1LiteMonitorGUI:
         self.right_command_var = tk.StringVar(value="waiting for data")
         self.left_state_var = tk.StringVar(value="waiting for data")
         self.right_state_var = tk.StringVar(value="waiting for data")
+        self.torso_state_var = tk.StringVar(value="waiting for data")
         self.faults_var = tk.StringVar(value="no faults")
 
         self.image_labels: Dict[str, ttk.Label] = {}
@@ -224,10 +246,14 @@ class R1LiteMonitorGUI:
         ttk.Button(buttons, text="Brake Toggle", command=self._toggle_brake).grid(row=0, column=0, sticky="ew", pady=(0, 10))
         ttk.Button(buttons, text="Reset", command=self._reset_robot).grid(row=1, column=0, sticky="ew", pady=(0, 10))
         ttk.Button(buttons, text="Clear Fault", command=self._clear_fault).grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        ttk.Button(buttons, text="Refresh Now", command=self._refresh_once_async).grid(row=3, column=0, sticky="ew")
+        ttk.Button(buttons, text="Recover", command=self._recover_robot).grid(row=3, column=0, sticky="ew")
+
+        torso = ttk.LabelFrame(frame, text="Torso State", style="Panel.TLabelframe", padding=8)
+        torso.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        ttk.Label(torso, textvariable=self.torso_state_var, justify="left", font=("TkFixedFont", 12)).pack(fill="both", expand=True)
 
         info = ttk.LabelFrame(frame, text="Hints", style="Panel.TLabelframe", padding=8)
-        info.grid(row=2, column=0, sticky="nsew", pady=(14, 0))
+        info.grid(row=3, column=0, sticky="nsew", pady=(14, 0))
         hint = (
             "Images update at high rate.\n"
             "State and command text update every 0.5s.\n"
@@ -316,6 +342,9 @@ class R1LiteMonitorGUI:
             for key, value in validity.get(side, {}).items():
                 if value is False:
                     warning_keys.append(f"validity:{side}:{key}")
+        for key, value in validity.get("torso", {}).items():
+            if value is False:
+                warning_keys.append(f"validity:torso:{key}")
         for key, value in validity.get("images", {}).items():
             if value is False:
                 warning_keys.append(f"validity:image:{key}")
@@ -392,6 +421,7 @@ class R1LiteMonitorGUI:
         self.right_command_var.set(self._format_command_text("right", commands.get("right", {}), command_owner, teleop_source))
         self.left_state_var.set(self._format_arm_state_text("left", state.get("left", {}), packet))
         self.right_state_var.set(self._format_arm_state_text("right", state.get("right", {}), packet))
+        self.torso_state_var.set(self._format_torso_state_text(state.get("torso", {}), packet))
 
         self._sync_logs_from_health(packet, current_health)
 
@@ -424,6 +454,16 @@ class R1LiteMonitorGUI:
         ]
         return "\n".join(lines)
 
+    def _format_torso_state_text(self, torso_state: Dict, packet: Dict) -> str:
+        validity = packet.get("meta", {}).get("validity", {}).get("torso", {})
+        lines = [
+            f"joint_pos: {_format_vector(torso_state.get('joint_pos'))}",
+            f"joint_vel: {_format_vector(torso_state.get('joint_vel'))}",
+            f"joint_effort: {_format_vector(torso_state.get('joint_effort'))}",
+            f"validity: {validity}",
+        ]
+        return "\n".join(lines)
+
     def _run_action_async(self, fn, success_text: str):
         def worker():
             try:
@@ -441,10 +481,21 @@ class R1LiteMonitorGUI:
         self._run_action_async(lambda: self.client.brake(enabled), f"brake set to {enabled}")
 
     def _reset_robot(self):
-        self._run_action_async(lambda: self.client.reset(owner="debug"), "reset sent")
+        self._run_action_async(
+            lambda: self.client.reset(
+                left_joint=self.reset_left_joint,
+                right_joint=self.reset_right_joint,
+                torso=self.reset_torso,
+                owner="debug",
+            ),
+            "reset sent",
+        )
 
     def _clear_fault(self):
         self._run_action_async(lambda: self.client.clear_fault(owner="debug"), "clear_fault sent")
+
+    def _recover_robot(self):
+        self._run_action_async(lambda: self.client.recover(owner="debug"), "recover sent")
 
     def _refresh_once(self):
         try:
@@ -468,10 +519,28 @@ def main():
     parser.add_argument("--server-url", default="http://127.0.0.1:8001/")
     parser.add_argument("--image-hz", type=float, default=5.0, help="Polling rate for state packets used to refresh images")
     parser.add_argument("--state-period", type=float, default=0.5, help="Refresh period for text state panels")
+    parser.add_argument("--reset-left-joint", default=None, help="Optional 6 floats for reset left arm joint target")
+    parser.add_argument("--reset-right-joint", default=None, help="Optional 6 floats for reset right arm joint target")
+    parser.add_argument("--reset-torso", default=None, help="Optional 3 floats for reset torso joint target; omitted uses server default")
     args = parser.parse_args()
 
+    try:
+        reset_left_joint = _parse_float_vector(args.reset_left_joint, 6, "--reset-left-joint")
+        reset_right_joint = _parse_float_vector(args.reset_right_joint, 6, "--reset-right-joint")
+        reset_torso = _parse_float_vector(args.reset_torso, 3, "--reset-torso")
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
     root = tk.Tk()
-    R1LiteMonitorGUI(root=root, server_url=args.server_url, image_hz=args.image_hz, state_period=args.state_period)
+    R1LiteMonitorGUI(
+        root=root,
+        server_url=args.server_url,
+        image_hz=args.image_hz,
+        state_period=args.state_period,
+        reset_left_joint=reset_left_joint,
+        reset_right_joint=reset_right_joint,
+        reset_torso=reset_torso,
+    )
     root.mainloop()
 
 

@@ -214,9 +214,8 @@ class _BaseR1LiteEnv(gym.Env):
     def _normalize_quat_or_identity(self, quat: np.ndarray) -> np.ndarray:
         quat = np.asarray(quat, dtype=np.float32).copy()
         norm = float(np.linalg.norm(quat))
-        # 配置里如果误填了零四元数，兜底成单位四元数，避免 reset 直接崩掉。
         if norm < 1e-8:
-            return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+            raise ValueError("reset/action quaternion norm is zero")
         return quat / norm
 
     def _sample_reset_pose(self, arm: str) -> Optional[list]:
@@ -225,9 +224,11 @@ class _BaseR1LiteEnv(gym.Env):
         else:
             pose = np.asarray(self.config.RESET_RIGHT_POSE, dtype=np.float32).copy()
 
-        # 兼容 R1Lite 当前配置习惯：全 0 代表“不要走末端 pose reset，而是回落到服务端默认关节 reset”。
         if pose.shape[0] >= 7 and np.allclose(pose, 0.0):
-            return None
+            raise ValueError(
+                f"RESET_{arm.upper()}_POSE is all zeros; training reset uses explicit EEF pose_target "
+                "and requires a configured reset pose"
+            )
         pose[3:] = self._normalize_quat_or_identity(pose[3:])
 
         if self.random_reset:
@@ -237,6 +238,23 @@ class _BaseR1LiteEnv(gym.Env):
             pose[3:] = Rotation.from_euler("xyz", euler).as_quat().astype(np.float32)
 
         return self._clip_pose_to_safety_box(arm, pose).tolist()
+
+    def _post_explicit_eef_reset_action(self, left_pose: Optional[list] = None, right_pose: Optional[list] = None):
+        payload = {
+            "mode": self.config.DEFAULT_MODE,
+            "owner": "policy",
+        }
+        if left_pose is not None:
+            payload["left"] = {
+                "pose_target": left_pose,
+                "preset": self.config.DEFAULT_PRESET,
+            }
+        if right_pose is not None:
+            payload["right"] = {
+                "pose_target": right_pose,
+                "preset": self.config.DEFAULT_PRESET,
+            }
+        self.client.post_action(payload)
 
     def _clip_pose_to_safety_box(self, arm: str, pose: np.ndarray) -> np.ndarray:
         clipped = np.asarray(pose, dtype=np.float32).copy()
@@ -416,22 +434,17 @@ class R1LiteArmEnv(_BaseR1LiteEnv):
         self.curr_path_length = 0
         self.commanded_pose = None
         reset_pose = self._sample_reset_pose(self.arm)
-        reset_joint = None
         if self.arm == "left":
-            if reset_pose is None:
-                reset_joint = np.asarray(self.config.RESET_LEFT_JOINT[:6], dtype=np.float32)
-            self.client.reset(left_pose=reset_pose, torso=self.config.RESET_TORSO)
+            self._post_explicit_eef_reset_action(left_pose=reset_pose)
         else:
-            if reset_pose is None:
-                reset_joint = np.asarray(self.config.RESET_RIGHT_JOINT[:6], dtype=np.float32)
-            self.client.reset(right_pose=reset_pose, torso=self.config.RESET_TORSO)
+            self._post_explicit_eef_reset_action(right_pose=reset_pose)
         # fixed-gripper 任务在 reset 后显式张开一次夹爪，后续 step 将不再驱动它。
         self._maybe_set_fixed_gripper_open(self.arm)
         time.sleep(max(0.0, float(self.config.RESET_SETTLE_SEC)))
         raw = self._wait_until_reset_ready(
             self.arm,
-            None if reset_pose is None else np.asarray(reset_pose, dtype=np.float32),
-            reset_joint,
+            np.asarray(reset_pose, dtype=np.float32),
+            None,
         )
         obs = self._extract_obs(raw)
         # reset 后把“最后一次已发送目标”同步到当前末端位姿。
@@ -558,20 +571,9 @@ class DualR1LiteEnv(_BaseR1LiteEnv):
         self.commanded_pose = {"left": None, "right": None}
         left_reset_pose = self._sample_reset_pose("left")
         right_reset_pose = self._sample_reset_pose("right")
-        left_reset_joint = (
-            np.asarray(self.config.RESET_LEFT_JOINT[:6], dtype=np.float32)
-            if left_reset_pose is None
-            else None
-        )
-        right_reset_joint = (
-            np.asarray(self.config.RESET_RIGHT_JOINT[:6], dtype=np.float32)
-            if right_reset_pose is None
-            else None
-        )
-        self.client.reset(
+        self._post_explicit_eef_reset_action(
             left_pose=left_reset_pose,
             right_pose=right_reset_pose,
-            torso=self.config.RESET_TORSO,
         )
         if bool(self.config.FIX_GRIPPER_OPEN):
             self._maybe_set_fixed_gripper_open("left")
@@ -579,13 +581,13 @@ class DualR1LiteEnv(_BaseR1LiteEnv):
         time.sleep(max(0.0, float(self.config.RESET_SETTLE_SEC)))
         self._wait_until_reset_ready(
             "left",
-            None if left_reset_pose is None else np.asarray(left_reset_pose, dtype=np.float32),
-            left_reset_joint,
+            np.asarray(left_reset_pose, dtype=np.float32),
+            None,
         )
         raw = self._wait_until_reset_ready(
             "right",
-            None if right_reset_pose is None else np.asarray(right_reset_pose, dtype=np.float32),
-            right_reset_joint,
+            np.asarray(right_reset_pose, dtype=np.float32),
+            None,
         )
         obs = self._extract_obs(raw)
         self.commanded_pose["left"] = self._canonical_tcp_pose(raw["state"]["left"]["tcp_pose"])

@@ -184,7 +184,7 @@ def run() -> None:
     parser.add_argument("--xyz-scale", type=float, default=float(control_defaults.get("xyz_scale", 0.03)))
     parser.add_argument("--rot-scale", type=float, default=float(control_defaults.get("rot_scale", 0.20)))
     parser.add_argument("--preset", default="free_space")
-    parser.add_argument("--mode", default=None, help="Defaults to the current service active_mode")
+    parser.add_argument("--mode", default="ee_pose_servo", choices=("ee_pose_servo",))
     parser.add_argument("--calibrate-seconds", type=float, default=0.5, help="Keep the SpaceMouse still at startup to estimate zero bias")
     parser.add_argument("--trans-deadzone", type=float, default=0.08, help="Deadzone for translation axes after bias removal")
     parser.add_argument("--rot-deadzone", type=float, default=0.08, help="Deadzone for rotation axes after bias removal")
@@ -233,7 +233,7 @@ def run() -> None:
         while True:
             start_time = time.time()
             state = client.get_state()
-            mode = args.mode or state["meta"]["mode"]
+            mode = args.mode
             action, buttons = expert.get_action()
             action = _apply_deadzone(
                 np.asarray(action, dtype=np.float64) - bias,

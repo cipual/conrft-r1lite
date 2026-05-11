@@ -5,7 +5,10 @@ import csv
 import json
 import os
 import pickle
+import sys
+import termios
 import time
+import tty
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -32,6 +35,14 @@ _ensure_examples_on_path()
 
 from experiments.mappings import CONFIG_MAPPING  # noqa: E402
 from r1lite_env import DualR1LiteEnv, R1LiteArmEnv  # noqa: E402
+
+_ANSI_RESET = "\033[0m"
+_ANSI_GREEN = "\033[92m"
+_ANSI_YELLOW = "\033[93m"
+_ANSI_RED = "\033[91m"
+_ANSI_CYAN = "\033[96m"
+_ANSI_MAGENTA = "\033[95m"
+_ANSI_BOLD = "\033[1m"
 
 
 _FIELD_SHAPES = {
@@ -62,6 +73,23 @@ _FIELD_SHAPES = {
     "torso": (9,),
     "torso_pos": (1,),
 }
+
+
+def _colorize(text: str, color: str) -> str:
+    return f"{color}{text}{_ANSI_RESET}"
+
+
+def _read_single_key(prompt: str) -> str:
+    print(prompt, end="", flush=True)
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        key = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    print(key)
+    return key.lower()
 
 
 def _load_transitions(pkl_path: Path) -> List[Dict]:
@@ -537,6 +565,149 @@ def _send_state_targets(env, task_mode: str, single_arm: Optional[str], targets:
     return _current_pose_and_gripper_from_env(env, task_mode, single_arm)
 
 
+def _debug_error_color(pos_err_m: float, ori_err_rad: float, pos_thresh: float, ori_thresh: float) -> str:
+    if pos_err_m <= pos_thresh and ori_err_rad <= ori_thresh:
+        return _ANSI_GREEN
+    if pos_err_m <= (2.0 * pos_thresh) and ori_err_rad <= (2.0 * ori_thresh):
+        return _ANSI_YELLOW
+    return _ANSI_RED
+
+
+def _debug_print_action(step: int, actions: Dict[str, np.ndarray]) -> bool:
+    print(_colorize(f"\n[replay-debug] step={step}", _ANSI_BOLD + _ANSI_CYAN))
+    if "left" in actions and "right" in actions:
+        left = np.asarray(actions["left"], dtype=np.float32).reshape(-1)
+        right = np.asarray(actions["right"], dtype=np.float32).reshape(-1)
+        print(
+            _colorize("  action:left ", _ANSI_GREEN)
+            + f"xyz={np.array2string(left[:3], precision=4, suppress_small=True)} "
+            + f"rpy={np.array2string(left[3:6], precision=4, suppress_small=True)} "
+            + f"grip={left[6]:.3f}"
+        )
+        print(
+            _colorize("  action:right", _ANSI_MAGENTA)
+            + f" xyz={np.array2string(right[:3], precision=4, suppress_small=True)} "
+            + f"rpy={np.array2string(right[3:6], precision=4, suppress_small=True)} "
+            + f"grip={right[6]:.3f}"
+        )
+    else:
+        label, arm_action = next(iter(actions.items()))
+        arm_action = np.asarray(arm_action, dtype=np.float32).reshape(-1)
+        print(
+            _colorize(f"  action:{label}", _ANSI_GREEN)
+            + f" xyz={np.array2string(arm_action[:3], precision=4, suppress_small=True)} "
+            + f"rpy={np.array2string(arm_action[3:6], precision=4, suppress_small=True)} "
+            + f"grip={arm_action[6]:.3f}"
+        )
+    while True:
+        key = _read_single_key("[replay-debug] press 's' to execute one step, 'q' to quit: ")
+        if key == "s":
+            return True
+        if key == "q":
+            return False
+
+
+def _debug_print_exec(
+    label: str,
+    reference_pose: np.ndarray,
+    unclipped_target_pose: np.ndarray,
+    target_pose: np.ndarray,
+    actual_pose: np.ndarray,
+    pos_thresh: float,
+    ori_thresh: float,
+):
+    commanded_delta = target_pose[:3] - reference_pose[:3]
+    actual_delta = actual_pose[:3] - reference_pose[:3]
+    clip_delta = target_pose[:3] - unclipped_target_pose[:3]
+    pos_err_m = float(np.linalg.norm(actual_pose[:3] - target_pose[:3]))
+    ori_err_rad = _quat_angle_error_rad(actual_pose[3:7], target_pose[3:7])
+    err_color = _debug_error_color(pos_err_m, ori_err_rad, pos_thresh, ori_thresh)
+    header_color = _ANSI_GREEN if label == "left" else _ANSI_MAGENTA
+    print(_colorize(f"  [replay-debug:{label}-exec]", _ANSI_BOLD + header_color))
+    print(
+        f"    ref_xyz    = {np.array2string(reference_pose[:3], precision=4, suppress_small=True)}\n"
+        f"    target_xyz = {np.array2string(target_pose[:3], precision=4, suppress_small=True)}\n"
+        f"    next_xyz   = {np.array2string(actual_pose[:3], precision=4, suppress_small=True)}"
+    )
+    print(
+        f"    cmd_dxyz   = {np.array2string(commanded_delta, precision=4, suppress_small=True)}\n"
+        f"    actual_dxyz= {np.array2string(actual_delta, precision=4, suppress_small=True)}\n"
+        f"    clip_dxyz  = {np.array2string(clip_delta, precision=4, suppress_small=True)}"
+    )
+    print(
+        _colorize(
+            f"    target_err = pos={pos_err_m:.4f} m  ori={ori_err_rad:.4f} rad",
+            err_color,
+        )
+    )
+    return {
+        "label": label,
+        "target_pose": np.asarray(target_pose, dtype=np.float32).reshape(-1),
+        "pos_err_m": pos_err_m,
+        "ori_err_rad": ori_err_rad,
+    }
+
+
+def _debug_wait_until_small_error(
+    env,
+    task_mode: str,
+    single_arm: Optional[str],
+    metrics: List[Dict[str, object]],
+    pos_thresh: float,
+    ori_thresh: float,
+    poll_sec: float,
+) -> bool:
+    if not metrics:
+        return True
+    print(
+        _colorize(
+            (
+                "[replay-debug] blocking until execution error is small enough "
+                f"(pos<={pos_thresh:.4f}m, ori<={ori_thresh:.4f}rad)"
+            ),
+            _ANSI_BOLD + _ANSI_YELLOW,
+        )
+    )
+    while True:
+        key = _read_single_key("[replay-debug] press 'c' to check error, 's' to skip wait, 'q' to quit: ")
+        if key == "q":
+            return False
+        if key == "s":
+            return True
+        if key != "c":
+            continue
+
+        pose_map, _ = _current_pose_and_gripper_from_env(env, task_mode, single_arm)
+        all_small = True
+        for metric in metrics:
+            label = str(metric["label"])
+            target_pose = np.asarray(metric["target_pose"], dtype=np.float32).reshape(-1)
+            actual_pose = pose_map.get(label, pose_map.get(single_arm or "arm"))
+            if actual_pose is None:
+                continue
+            pos_err_m = float(np.linalg.norm(actual_pose[:3] - target_pose[:3]))
+            ori_err_rad = _quat_angle_error_rad(actual_pose[3:7], target_pose[3:7])
+            color = _debug_error_color(pos_err_m, ori_err_rad, pos_thresh, ori_thresh)
+            print(
+                _colorize(
+                    (
+                        f"  [replay-debug:{label}-wait]\n"
+                        f"    target_xyz = {np.array2string(target_pose[:3], precision=4, suppress_small=True)}\n"
+                        f"    actual_xyz = {np.array2string(actual_pose[:3], precision=4, suppress_small=True)}\n"
+                        f"    pos_err    = ||actual_xyz - target_xyz|| = {pos_err_m:.4f} m\n"
+                        f"    ori_err    = {ori_err_rad:.4f} rad"
+                    ),
+                    color,
+                )
+            )
+            if pos_err_m > pos_thresh or ori_err_rad > ori_thresh:
+                all_small = False
+        if all_small:
+            print(_colorize("[replay-debug] error gate passed", _ANSI_BOLD + _ANSI_GREEN))
+            return True
+        time.sleep(max(0.0, poll_sec))
+
+
 def _debug_info_to_maps(info: Dict, task_mode: str, single_arm: Optional[str]):
     if task_mode == "dual":
         reference = {
@@ -577,6 +748,12 @@ def run_online(
     reset_after: bool,
     reset_wait_sec: float,
     log_every: int,
+    online_start_mode: str,
+    debug: bool,
+    debug_block_until_error_small: bool,
+    debug_block_pos_err_m: float,
+    debug_block_ori_err_rad: float,
+    debug_block_poll_sec: float,
 ) -> List[Dict[str, object]]:
     selected_indices = list(selected_indices)
     if len(selected_indices) != 1:
@@ -591,8 +768,49 @@ def run_online(
 
     rows: List[Dict[str, object]] = []
     stop = len(trajectory) if max_steps is None else min(len(trajectory), start_step + max_steps)
-    print(f"Online replay trajectory={traj_idx}, steps={stop - start_step}, mode={replay_mode}")
-    for step_idx in range(start_step, stop):
+    loop_start = 0 if online_start_mode == "preroll" and start_step > 0 else start_step
+    if online_start_mode == "preroll" and start_step > 0:
+        print(
+            f"Online replay trajectory={traj_idx}, preroll_steps={start_step}, "
+            f"debug_start_step={start_step}, steps={stop - start_step}, mode={replay_mode}"
+        )
+    elif online_start_mode == "move_to_recorded" and start_step > 0:
+        print(
+            f"Online replay trajectory={traj_idx}, move_to_recorded_step={start_step}, "
+            f"steps={stop - start_step}, mode={replay_mode}"
+        )
+    else:
+        print(f"Online replay trajectory={traj_idx}, steps={stop - start_step}, mode={replay_mode}")
+
+    if online_start_mode == "move_to_recorded" and start_step > 0:
+        recorded_start = _extract_pose_map(trajectory[start_step]["observations"], field_slices, task_mode, single_arm)
+        recorded_start_grippers = _extract_gripper_map(
+            trajectory[start_step]["observations"],
+            field_slices,
+            task_mode,
+            single_arm,
+        )
+        print(
+            "[replay] moving robot to recorded current pose at "
+            f"step={start_step} before executing replay actions"
+        )
+        _send_state_targets(env, task_mode, single_arm, recorded_start, recorded_start_grippers)
+        time.sleep(max(0.0, reset_wait_sec))
+
+    if online_start_mode == "recorded_reference" and start_step > 0:
+        recorded_start = _extract_pose_map(trajectory[start_step]["observations"], field_slices, task_mode, single_arm)
+        if task_mode == "dual":
+            env.commanded_pose["left"] = recorded_start["left"].copy()
+            env.commanded_pose["right"] = recorded_start["right"].copy()
+        else:
+            env.commanded_pose = recorded_start[single_arm or "arm"].copy()
+        print(
+            "[replay] initialized commanded reference from recorded current pose at "
+            f"step={start_step}. This does not move the robot actual pose."
+        )
+
+    for step_idx in range(loop_start, stop):
+        is_preroll = step_idx < start_step
         transition = trajectory[step_idx]
         recorded_current = _extract_pose_map(transition["observations"], field_slices, task_mode, single_arm)
         recorded_next = _extract_pose_map(transition["next_observations"], field_slices, task_mode, single_arm)
@@ -600,6 +818,10 @@ def run_online(
         recorded_next_gripper = _extract_gripper_map(transition["next_observations"], field_slices, task_mode, single_arm)
         actions = _action_map(transition["actions"], task_mode, single_arm)
         before_poses, before_grippers = _current_pose_and_gripper_from_env(env, task_mode, single_arm)
+
+        if (not is_preroll) and debug and not _debug_print_action(step_idx, actions):
+            print("[replay-debug] stop requested")
+            break
 
         if replay_mode == "action":
             action_array = np.asarray(transition["actions"], dtype=np.float32)
@@ -622,6 +844,38 @@ def run_online(
                 targets,
                 target_grippers,
             )
+
+        metrics = []
+        if (not is_preroll) and debug:
+            for arm in targets:
+                metrics.append(
+                    _debug_print_exec(
+                        arm,
+                        np.asarray(reference[arm], dtype=np.float32),
+                        np.asarray(unclipped_targets[arm], dtype=np.float32),
+                        np.asarray(targets[arm], dtype=np.float32),
+                        np.asarray(actual_poses[arm], dtype=np.float32),
+                        debug_block_pos_err_m,
+                        debug_block_ori_err_rad,
+                    )
+                )
+            if debug_block_until_error_small:
+                if not _debug_wait_until_small_error(
+                    env,
+                    task_mode,
+                    single_arm,
+                    metrics,
+                    debug_block_pos_err_m,
+                    debug_block_ori_err_rad,
+                    debug_block_poll_sec,
+                ):
+                    print("[replay-debug] stop requested")
+                    break
+
+        if is_preroll:
+            if (step_idx + 1) % max(1, log_every) == 0 or step_idx == start_step - 1:
+                print(f"[online-replay:preroll] step={step_idx + 1}/{start_step}")
+            continue
 
         base = _row_base(traj_idx, step_idx, "online", replay_mode, "", transition)
         for arm in targets:
@@ -745,12 +999,39 @@ def main():
         default="teacher_forced",
         help="Offline action replay reference: recorded current state each step, or integrated predicted state.",
     )
-    parser.add_argument("--start_step", type=int, default=0)
+    parser.add_argument("--start_step", type=int, default=0, help="Start replay from this step index.")
+    parser.add_argument(
+        "--start_exec_step",
+        type=int,
+        default=None,
+        help="Alias for --start_step. If set, this value takes precedence.",
+    )
     parser.add_argument("--max_steps", type=int, default=None)
     parser.add_argument("--no_reset_before", action="store_true", help="Online only: skip reset before replay.")
     parser.add_argument("--no_reset_after", action="store_true", help="Online only: skip reset after replay.")
     parser.add_argument("--reset_wait_sec", type=float, default=1.0)
     parser.add_argument("--log_every", type=int, default=10)
+    parser.add_argument(
+        "--online_start_mode",
+        choices=("move_to_recorded", "preroll", "current", "recorded_reference"),
+        default="move_to_recorded",
+        help=(
+            "Online only behavior when start_step > 0. "
+            "'move_to_recorded' first sends the robot to the recorded current pose at start_step; "
+            "'preroll' silently executes previous steps to restore commanded reference; "
+            "'current' applies the start action from the current env reference; "
+            "'recorded_reference' seeds env.commanded_pose from recorded current pose without moving the robot."
+        ),
+    )
+    parser.add_argument("--debug", action="store_true", help="Online only: step-by-step debug mode.")
+    parser.add_argument(
+        "--debug_block_until_error_small",
+        action="store_true",
+        help="Online only: after each step, block until target-vs-actual error is below threshold.",
+    )
+    parser.add_argument("--debug_block_pos_err_m", type=float, default=0.01)
+    parser.add_argument("--debug_block_ori_err_rad", type=float, default=0.10)
+    parser.add_argument("--debug_block_poll_sec", type=float, default=0.2)
     parser.add_argument("--output_csv", default=None, help="Optional path for per-step error CSV.")
     parser.add_argument("--output_npz", default=None, help="Optional path for numeric error arrays.")
     parser.add_argument("--output_summary_json", default=None, help="Optional path for summary JSON.")
@@ -765,6 +1046,13 @@ def main():
 
     if args.exec_mode == "online" and args.all_trajectories:
         raise ValueError("--all_trajectories is only supported for --exec_mode=offline")
+    if args.exec_mode == "offline" and (
+        args.debug or args.debug_block_until_error_small
+    ):
+        raise ValueError("--debug flags are only supported for --exec_mode=online")
+    start_step = args.start_exec_step if args.start_exec_step is not None else args.start_step
+    if start_step < 0:
+        raise ValueError(f"start step must be non-negative, got {start_step}")
 
     cfg, env, task_mode, single_arm, proprio_keys = _make_env(args.exp_name)
     selected_order, field_slices = _select_field_slices(
@@ -776,7 +1064,7 @@ def main():
     selected = _trajectory_indices(trajectories, args.trajectory_index, args.all_trajectories)
     print(f"Task mode: {task_mode}, single_arm={single_arm}")
     print(f"State layout: gym_sorted, proprio_order={selected_order}")
-    print(f"Replay mode: exec={args.exec_mode}, replay={args.replay_mode}")
+    print(f"Replay mode: exec={args.exec_mode}, replay={args.replay_mode}, start_step={start_step}")
 
     try:
         if args.exec_mode == "offline":
@@ -789,7 +1077,7 @@ def main():
                 single_arm,
                 args.replay_mode,
                 args.offline_reference,
-                args.start_step,
+                start_step,
                 args.max_steps,
             )
         else:
@@ -805,12 +1093,18 @@ def main():
                 task_mode,
                 single_arm,
                 args.replay_mode,
-                args.start_step,
+                start_step,
                 args.max_steps,
                 reset_before=not args.no_reset_before,
                 reset_after=not args.no_reset_after,
                 reset_wait_sec=args.reset_wait_sec,
                 log_every=args.log_every,
+                online_start_mode=args.online_start_mode,
+                debug=args.debug,
+                debug_block_until_error_small=args.debug_block_until_error_small,
+                debug_block_pos_err_m=args.debug_block_pos_err_m,
+                debug_block_ori_err_rad=args.debug_block_ori_err_rad,
+                debug_block_poll_sec=args.debug_block_poll_sec,
             )
     finally:
         env.close()

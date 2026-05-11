@@ -32,6 +32,11 @@ class R1LiteClient:
         response.raise_for_status()
         return response.json()
 
+    def get_torso_state(self) -> Dict[str, Any]:
+        response = self.session.get(self._url("torso"), timeout=self.timeout)
+        response.raise_for_status()
+        return response.json()
+
     def get_health(self) -> Dict[str, Any]:
         response = self.session.get(self._url("health"), timeout=self.timeout)
         response.raise_for_status()
@@ -42,18 +47,8 @@ class R1LiteClient:
         response.raise_for_status()
         return response.json()
 
-    def set_mode(self, mode: str, owner: str = "debug") -> Dict[str, Any]:
-        response = self.session.post(self._url("mode"), json={"mode": mode, "owner": owner}, timeout=self.timeout)
-        response.raise_for_status()
-        return response.json()
-
-    def hold(self, owner: str = "debug") -> Dict[str, Any]:
-        response = self.session.post(self._url("hold"), json={"mode": "hold", "owner": owner}, timeout=self.timeout)
-        response.raise_for_status()
-        return response.json()
-
     def recover(self, owner: str = "debug") -> Dict[str, Any]:
-        response = self.session.post(self._url("recover"), json={"mode": "recover", "owner": owner}, timeout=self.timeout)
+        response = self.session.post(self._url("recover"), json={"owner": owner}, timeout=self.timeout)
         response.raise_for_status()
         return response.json()
 
@@ -71,12 +66,12 @@ class R1LiteClient:
         response.raise_for_status()
         return response.json()
 
-    def reset(self, left_pose=None, right_pose=None, torso=None, owner: str = "debug") -> Dict[str, Any]:
+    def reset(self, left_joint=None, right_joint=None, torso=None, owner: str = "debug") -> Dict[str, Any]:
         payload = {"owner": owner}
-        if left_pose is not None:
-            payload["left_pose"] = left_pose
-        if right_pose is not None:
-            payload["right_pose"] = right_pose
+        if left_joint is not None:
+            payload["left_joint"] = left_joint
+        if right_joint is not None:
+            payload["right_joint"] = right_joint
         if torso is not None:
             payload["torso"] = torso
         response = self.session.post(self._url("reset"), json=payload, timeout=self.timeout)

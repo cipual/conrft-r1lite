@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+# 旧/备选路径：官方teleop RAW 直接转 ConRFT transition
 import argparse
 import json
 import os

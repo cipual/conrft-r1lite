@@ -24,7 +24,7 @@ export ROBOT=http://192.168.12.12:8001
 
 | Owner | Allowed endpoints | Purpose |
 | --- | --- | --- |
-| public | `GET /state`, `GET /health` | read-only inspection |
+| public | `GET /state`, `GET /health`, `GET /torso` | read-only inspection |
 | policy | `POST /action` | inference env control, including policy rollout |
 | teleop | `POST /action` | human teleoperation only; requires `teleop_source="spacemouse"` |
 | debug | `POST /reset`, `POST /recover`, `POST /clear_fault`, `POST /brake` | maintenance and recovery only |
@@ -56,6 +56,12 @@ Read health:
 
 ```bash
 curl --noproxy '*' -X GET "$ROBOT/health"
+```
+
+Read torso state:
+
+```bash
+curl --noproxy '*' -s "$ROBOT/torso" | jq
 ```
 
 Send a policy action:
@@ -96,7 +102,12 @@ Reset:
 ```bash
 curl --noproxy '*' -X POST "$ROBOT/reset" \
   -H "Content-Type: application/json" \
-  -d '{"owner":"debug"}'
+  -d '{
+    "owner":"debug",
+    "left_joint":[0.0,0.0,0.0,0.0,0.0,0.0],
+    "right_joint":[0.0,0.0,0.0,0.0,0.0,0.0],
+    "torso":[-0.633,1.437,0.765]
+  }'
 ```
 
 Recover:
@@ -133,8 +144,9 @@ curl --noproxy '*' -X POST "$ROBOT/brake" \
 
 ## Notes
 
-- If the service was started in MIT mode, keep `mode` in `/action` aligned with the startup mode.
-- HTTP 409 usually means the active control owner is still locked by another control session, or the requested mode does not match the startup mode.
+- The robot service only supports `ee_pose_servo`. Do not send MIT/compliance modes.
+- The robot service does not clip `pose_delta`; workspace and action limits belong in the env/replay side.
+- HTTP 409 usually means the active control owner is still locked by another control session.
 
 ## SpaceMouse Teleop
 

@@ -345,7 +345,7 @@ def main():
     parser.add_argument("--control_hz", type=float, default=10.0)
     parser.add_argument("--log_every", type=int, default=10)
     parser.add_argument("--reset_wait_sec", type=float, default=1.0)
-    parser.add_argument("--mode", default="ee_pose_servo", choices=("ee_pose_servo", "mit_joint_compliance"))
+    parser.add_argument("--mode", default="ee_pose_servo", choices=("ee_pose_servo",))
     parser.add_argument(
         "--output_image_3d",
         default="/home/ps/VLA-RL/conrft-r1lite/examples/debug/r1lite_reach_target/consistance/r1lite_debug_joint_replay_compare_3d.png",

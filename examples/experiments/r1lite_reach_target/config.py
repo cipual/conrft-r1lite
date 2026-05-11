@@ -131,11 +131,11 @@ class EnvConfig(R1LiteEnvConfig):
     RESET_STABLE_POS_EPS_M: float = float(_cfg("env.reset_stable_pos_eps_m", 0.005))
     RESET_STABLE_ORI_EPS_RAD: float = float(_cfg("env.reset_stable_ori_eps_rad", 0.08))
     RESET_STABLE_JOINT_EPS_RAD: float = float(_cfg("env.reset_stable_joint_eps_rad", 0.03))
-    # 这里约定“全 0”表示不要发末端 pose reset，而是回落到服务端默认关节 reset。
-    RESET_RIGHT_POSE: list = field(default_factory=lambda: list(_cfg("env.reset_right_pose", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])))
-    RESET_LEFT_POSE: list = field(default_factory=lambda: list(_cfg("env.reset_left_pose", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])))
+    RESET_RIGHT_POSE: list = field(default_factory=lambda: list(_cfg("env.reset_right_pose", [0.35, -0.35, 0.35, 0.0, 0.0, 0.0, 1.0])))
+    RESET_LEFT_POSE: list = field(default_factory=lambda: list(_cfg("env.reset_left_pose", [0.35, -0.25, 0.32, 0.0, 0.0, 0.0, 1.0])))
     RESET_RIGHT_JOINT: list = field(default_factory=lambda: list(_cfg("env.reset_right_joint", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])))
     RESET_LEFT_JOINT: list = field(default_factory=lambda: list(_cfg("env.reset_left_joint", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])))
+    RESET_TORSO: list = field(default_factory=lambda: list(_cfg("env.reset_torso", [-0.633, 1.437, 0.765])))
     ABS_POSE_LIMIT_LOW: dict = field(
         default_factory=lambda: {
             "left": list(_cfg("env.abs_pose_limit_low.left", [0.22, -0.42, 0.18, 0.0, -1.2, -1.2])),

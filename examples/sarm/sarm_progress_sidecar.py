@@ -12,6 +12,7 @@ import argparse
 import base64
 import json
 import logging
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from typing import Any, Dict, Tuple
@@ -51,6 +52,16 @@ class SARMProgressPredictor:
     def __init__(self, reward_model_path: str, device: str, default_head_mode: str):
         self.device = torch.device(device if device else "cuda" if torch.cuda.is_available() else "cpu")
         self.default_head_mode = default_head_mode
+
+        reward_model_path = str(Path(reward_model_path).expanduser())
+        path_obj = Path(reward_model_path)
+        if path_obj.is_absolute() and not path_obj.exists():
+            raise FileNotFoundError(
+                f"SARM reward model path does not exist: {path_obj}. "
+                "Pass the actual checkpoint directory ending in checkpoints/<step>/pretrained_model."
+            )
+        if path_obj.exists() and not path_obj.is_dir():
+            raise NotADirectoryError(f"SARM reward model path is not a directory: {path_obj}")
 
         LOG.info("Loading SARM model from %s", reward_model_path)
         self.reward_model = SARMRewardModel.from_pretrained(reward_model_path)

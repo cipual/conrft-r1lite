@@ -378,7 +378,7 @@ lerobot-train \
 cd /home/ps/VLA-RL/lerobot
 python -m lerobot.policies.sarm.compute_rabc_weights \
   --dataset-repo-id r1lite_dual_mango_box \
-  --reward-model-path /home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm/checkpoints/005000/pretrained_model \
+  --reward-model-path /home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_20260422_122234/checkpoints/005000/pretrained_model \
   --head-mode dense \
   --output-path /home/ps/VLA-RL/conrft-r1lite/data/lerobot/r1lite_dual_mango_box/sarm_progress.parquet \
   --output-dir /home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/rabc_viz \
@@ -509,8 +509,9 @@ offline 参数和链路 A 相同。默认值来自
 ```bash
 cd /home/ps/VLA-RL/conrft-r1lite
 export PYTHONPATH=/home/ps/VLA-RL/lerobot/src:$PYTHONPATH
+unset ALL_PROXY all_proxy
 python examples/sarm/sarm_progress_sidecar.py \
-  --reward_model_path=/home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm/checkpoints/005000/pretrained_model \
+  --reward_model_path=/home/ps/VLA-RL/conrft-r1lite/examples/sarm/outputs/train/r1lite_dual_mango_box_sarm_20260422_122234/checkpoints/005000/pretrained_model \
   --host=127.0.0.1 \
   --port=8010 \
   --device=cuda \
@@ -561,4 +562,3 @@ bash run_actor_conrft.sh --ip=localhost
 ```
 
 online 参数和链路 A 相同，默认值来自 mango 任务的 `online_training` 配置段。
-
